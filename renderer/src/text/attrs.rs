@@ -1,10 +1,18 @@
+use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::text::TextBrush;
 use crate::text::{FontStyle, FontWeight, FontWidth};
 use fontique::GenericFamily;
-use parley::style::{FontFamily, FontStack, StyleProperty, WordBreakStrength};
+use parley::style::{
+    FontFamily, FontSettings, FontStack, FontVariation, StyleProperty, WordBreakStrength,
+};
+use parley::swash::tag_from_bytes;
 use peniko::Color;
+
+/// The `opsz` variation axis, which a font with optical sizing uses to
+/// pick its design for a given size.
+const OPTICAL_SIZE: u32 = tag_from_bytes(b"opsz");
 
 /// An owned font family identifier.
 ///
@@ -344,14 +352,32 @@ impl<'a> Attrs<'a> {
         }
     }
 
+    /// The optical size to shape at: the font size, as CSS's default
+    /// `font-optical-sizing: auto` sets it.
+    ///
+    /// A variable font with an `opsz` axis, such as San Francisco or Inter,
+    /// carries a text design for small sizes and a display design for large
+    /// ones, and picks between them by this axis; left at the axis's default,
+    /// small text is drawn from the display design, tighter and lighter than
+    /// the system draws it. The font clamps the value to the axis's range,
+    /// and a font without the axis ignores it.
+    fn optical_size(&self) -> StyleProperty<'static, TextBrush> {
+        StyleProperty::FontVariations(FontSettings::List(Cow::Owned(vec![FontVariation {
+            tag: OPTICAL_SIZE,
+            value: self.font_size,
+        }])))
+    }
+
     /// Pushes all set properties as defaults onto a Parley [`RangedBuilder`].
     ///
-    /// Font size and line height are always pushed. Optional properties (color,
-    /// family, weight, style, width) are only pushed when set.
+    /// Font size, optical size and line height are always pushed. Optional
+    /// properties (color, family, weight, style, width) are only pushed when
+    /// set.
     ///
     /// [`RangedBuilder`]: parley::RangedBuilder
     pub fn apply_defaults(&self, builder: &mut parley::RangedBuilder<'_, TextBrush>) {
         builder.push_default(StyleProperty::FontSize(self.font_size));
+        builder.push_default(self.optical_size());
         let lh = self.effective_line_height();
         builder.push_default(StyleProperty::LineHeight(
             parley::style::LineHeight::Absolute(lh),
@@ -391,6 +417,7 @@ impl<'a> Attrs<'a> {
     ) {
         if self.font_size != defaults.font_size {
             builder.push(StyleProperty::FontSize(self.font_size), range.clone());
+            builder.push(self.optical_size(), range.clone());
         }
         if self.effective_line_height() != defaults.effective_line_height() {
             let lh = self.effective_line_height();

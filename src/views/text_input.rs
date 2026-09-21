@@ -1326,7 +1326,24 @@ impl View for TextInput {
                 if !cx.window_state.is_focused(self.id) {
                     return EventPropagation::Continue;
                 }
-                self.handle_key_down(cx.window_state, ke)
+                // An arrow key is the cursor's while the input has focus,
+                // whether or not the cursor can move by it: Alt with one
+                // moves a word, or nothing at the buffer's edge, and never
+                // walks the focus off to a neighbour.
+                let arrow = matches!(
+                    ke.key,
+                    Key::Named(
+                        NamedKey::ArrowLeft
+                            | NamedKey::ArrowRight
+                            | NamedKey::ArrowUp
+                            | NamedKey::ArrowDown
+                    )
+                );
+                let handled = self.handle_key_down(cx.window_state, ke);
+                if arrow {
+                    cx.prevent_default();
+                }
+                handled
             }
             Event::Ime(ImeEvent::Preedit { text, cursor }) => {
                 if self.is_focused && !text.is_empty() {

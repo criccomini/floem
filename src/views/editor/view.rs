@@ -1429,11 +1429,16 @@ fn editor_content(
                     if *key == Key::Named(NamedKey::Tab) {
                         cx.prevent_default();
                     }
+                    // A key the editor ran a command for is the editor's, so
+                    // no default action follows it: Alt with an arrow moves
+                    // the cursor by a word or the line up or down, and must
+                    // not also walk the focus off to a neighbour.
                     if handle_key_event(KeypressKey {
                         key: key.clone(),
                         modifiers: *modifiers,
                     }) == CommandExecuted::Yes
                     {
+                        cx.prevent_default();
                         cx.window_state.request_paint(cx.target);
                     }
 

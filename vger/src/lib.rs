@@ -1,11 +1,12 @@
 use std::cell::RefCell;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem;
 use std::sync::Arc;
 use std::sync::mpsc::sync_channel;
 
 use anyhow::Result;
 use floem_renderer::gpu_resources::GpuResources;
-use floem_renderer::text::{Glyph, GlyphRunProps};
+use floem_renderer::text::{Glyph, GlyphRunProps, NormalizedCoord};
 use floem_renderer::{Img, Renderer, tiny_skia};
 use floem_vger_rs::{GlyphImage, Image, PaintIndex, PixelFormat, Vger};
 use peniko::kurbo::{Size, Stroke};
@@ -511,7 +512,12 @@ impl Renderer for VgerRenderer {
         let Some(font_ref) = FontRef::from_index(font.data.data(), font.index as usize) else {
             return;
         };
-        let font_blob_id = font.data.id();
+        let font_key = glyph_font_key(
+            font.data.id(),
+            font.index,
+            props.normalized_coords,
+            props.hint,
+        );
         let _color = match &props.brush {
             peniko::Brush::Solid(color) => Color::from(*color),
             _ => return,
@@ -548,7 +554,7 @@ impl Renderer for VgerRenderer {
             self.vger.render_glyph(
                 glyph_x.floor(),
                 glyph_y.floor(),
-                font_blob_id,
+                font_key,
                 glyph_id,
                 scaled_font_size,
                 (x_bin, y_bin),
@@ -778,9 +784,41 @@ fn scaled_embolden_strength(font_embolden: f32, scale: f64) -> f32 {
     font_embolden * scale as f32
 }
 
+/// The font id a glyph is cached under. vger keys its atlas on this id,
+/// the glyph, the size, the subpixel bin and the synthesis bits, so
+/// everything else that shapes a bitmap is folded in here: the face
+/// index, without which Regular and Bold from one .ttc collapse into one
+/// entry and whichever drew first wins; the variation coordinates, without
+/// which every weight and optical size of a variable font does the same;
+/// and hinting.
+fn glyph_font_key(blob_id: u64, index: u32, coords: &[NormalizedCoord], hint: bool) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    blob_id.hash(&mut hasher);
+    index.hash(&mut hasher);
+    coords.hash(&mut hasher);
+    hint.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::scaled_embolden_strength;
+    use super::{glyph_font_key, scaled_embolden_strength};
+
+    #[test]
+    fn faces_of_one_file_and_settings_of_one_face_cache_apart() {
+        let regular = glyph_font_key(7, 0, &[], false);
+        assert_eq!(regular, glyph_font_key(7, 0, &[], false));
+        // Bold is another face in the same collection.
+        assert_ne!(regular, glyph_font_key(7, 1, &[], false));
+        // Another weight, or optical size, of a variable face.
+        assert_ne!(regular, glyph_font_key(7, 0, &[8192], false));
+        assert_ne!(
+            glyph_font_key(7, 0, &[8192, 0], false),
+            glyph_font_key(7, 0, &[0, 8192], false)
+        );
+        assert_ne!(regular, glyph_font_key(7, 0, &[], true));
+        assert_ne!(regular, glyph_font_key(8, 0, &[], false));
+    }
 
     #[test]
     fn embolden_strength_scales_with_raster_scale() {

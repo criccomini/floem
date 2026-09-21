@@ -544,23 +544,6 @@ impl Cursor {
                 if new_cursor {
                     let mut new_selection = selection.clone();
 
-                    let delete_overlapping_carets =
-                        |selection: &mut Selection, region: &SelRegion| {
-                            let left = region.min().saturating_sub(1);
-                            let right = region.max() + 1;
-                            let neighbors = selection.regions_in_range(left, right);
-                            let left_has_caret = neighbors.first().is_some_and(|r| r.is_caret());
-                            let right_has_caret = neighbors.last().is_some_and(|r| r.is_caret());
-
-                            if region.is_caret() || left_has_caret {
-                                selection.delete_range(left, left + 2);
-                            }
-
-                            if region.is_caret() || right_has_caret {
-                                selection.delete_range(left + 1, right);
-                            }
-                        };
-
                     if let (Some(mut region), true) =
                         (new_selection.last_inserted().cloned(), modify)
                     {
@@ -668,6 +651,59 @@ impl Cursor {
             }
         }
     }
+
+    /// Select from `start` to `end`, with the cursor at `end`, which may come
+    /// before `start`. Where `add_region` grows the selection, this sets it:
+    /// the one region, or with `new_cursor` one of several, in place of any
+    /// the range covers. An empty range is a caret.
+    pub fn set_region(
+        &mut self,
+        start: usize,
+        end: usize,
+        affinity: CursorAffinity,
+        new_cursor: bool,
+    ) {
+        match &self.mode {
+            CursorMode::Normal { .. } | CursorMode::Visual { .. } => {
+                // A visual selection's ends are the characters under them,
+                // so the range's exclusive end steps back onto its last one.
+                self.mode = if start == end {
+                    CursorMode::Normal {
+                        offset: start,
+                        affinity,
+                    }
+                } else {
+                    let (start, end) = if start < end {
+                        (start, end - 1)
+                    } else {
+                        (start - 1, end)
+                    };
+                    CursorMode::Visual {
+                        start,
+                        end,
+                        mode: VisualMode::Normal,
+                        affinity,
+                    }
+                };
+            }
+            CursorMode::Insert(selection) => {
+                let region = SelRegion::new(start, end, affinity, None);
+                let new_selection = if new_cursor {
+                    // As when `set_offset` drags: the regions the range
+                    // covers make way for it, rather than merging with it
+                    // and giving it their direction.
+                    let mut new_selection = selection.clone();
+                    new_selection.delete_range(region.min(), region.max());
+                    delete_overlapping_carets(&mut new_selection, &region);
+                    new_selection.add_region(region);
+                    new_selection
+                } else {
+                    Selection::sel_region(region)
+                };
+                self.mode = CursorMode::Insert(new_selection);
+            }
+        }
+    }
 }
 
 pub fn get_first_selection_after(
@@ -729,4 +765,117 @@ pub fn get_first_selection_after(
 
             Cursor::new(cursor_mode, None, None)
         })
+}
+
+/// Drop the carets `region` would swallow: one on either edge of it, or,
+/// when it is a caret itself, any at its position.
+fn delete_overlapping_carets(selection: &mut Selection, region: &SelRegion) {
+    let left = region.min().saturating_sub(1);
+    let right = region.max() + 1;
+    let neighbors = selection.regions_in_range(left, right);
+    let left_has_caret = neighbors.first().is_some_and(|r| r.is_caret());
+    let right_has_caret = neighbors.last().is_some_and(|r| r.is_caret());
+
+    if region.is_caret() || left_has_caret {
+        selection.delete_range(left, left + 2);
+    }
+
+    if region.is_caret() || right_has_caret {
+        selection.delete_range(left + 1, right);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{Cursor, CursorAffinity, CursorMode};
+    use crate::{
+        mode::VisualMode,
+        selection::{SelRegion, Selection},
+    };
+
+    fn insert(selection: Selection) -> Cursor {
+        Cursor::new(CursorMode::Insert(selection), None, None)
+    }
+
+    #[test]
+    fn set_region_replaces_the_insert_selection() {
+        let mut cursor = insert(Selection::region(4, 9, CursorAffinity::Backward));
+        cursor.set_region(9, 0, CursorAffinity::Forward, false);
+        assert_eq!(
+            cursor.mode,
+            CursorMode::Insert(Selection::region(9, 0, CursorAffinity::Forward)),
+            "one region, from the anchor back to the cursor"
+        );
+    }
+
+    #[test]
+    fn set_region_with_a_new_cursor_keeps_the_regions_it_does_not_cover() {
+        let regions = |cursor: &Cursor| {
+            cursor
+                .mode
+                .regions_iter()
+                .map(|(start, end, _)| (start, end))
+                .collect::<Vec<_>>()
+        };
+        // A word at 10..15 added to a selection of 0..3, then dragged by
+        // words: out to 20, then back and over the first region.
+        let mut selection = Selection::region(0, 3, CursorAffinity::Backward);
+        selection.add_region(SelRegion::new(10, 15, CursorAffinity::Backward, None));
+        let mut cursor = insert(selection);
+
+        cursor.set_region(10, 20, CursorAffinity::Backward, true);
+        assert_eq!(regions(&cursor), vec![(0, 3), (10, 20)]);
+
+        cursor.set_region(15, 2, CursorAffinity::Backward, true);
+        assert_eq!(
+            regions(&cursor),
+            vec![(15, 2)],
+            "the covered region goes; the range keeps its direction"
+        );
+    }
+
+    #[test]
+    fn set_region_in_a_modal_mode_selects_the_characters_under_its_ends() {
+        let mut cursor = Cursor::new(
+            CursorMode::Normal {
+                offset: 5,
+                affinity: CursorAffinity::Backward,
+            },
+            None,
+            None,
+        );
+        cursor.set_region(4, 9, CursorAffinity::Backward, false);
+        assert_eq!(
+            cursor.mode,
+            CursorMode::Visual {
+                start: 4,
+                end: 8,
+                mode: VisualMode::Normal,
+                affinity: CursorAffinity::Backward,
+            },
+            "forward, the cursor is on the range's last character"
+        );
+
+        cursor.set_region(9, 0, CursorAffinity::Backward, false);
+        assert_eq!(
+            cursor.mode,
+            CursorMode::Visual {
+                start: 8,
+                end: 0,
+                mode: VisualMode::Normal,
+                affinity: CursorAffinity::Backward,
+            },
+            "backward, the anchor is"
+        );
+
+        cursor.set_region(3, 3, CursorAffinity::Forward, false);
+        assert_eq!(
+            cursor.mode,
+            CursorMode::Normal {
+                offset: 3,
+                affinity: CursorAffinity::Forward,
+            },
+            "an empty range is no selection"
+        );
+    }
 }

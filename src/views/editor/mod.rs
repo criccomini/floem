@@ -142,6 +142,28 @@ impl EditorStyle {
 
 pub(crate) const CHAR_WIDTH: f64 = 7.5;
 
+/// What a drag grows the selection by, from how many clicks pressed the
+/// button: a character after a click, a word after a double click, a line
+/// after a triple click.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DragUnit {
+    #[default]
+    Char,
+    Word,
+    Line,
+}
+
+/// A drag from a press. `pressed` is the range the press selected, which the
+/// drag keeps however far it goes; `selected` is the range the drag has
+/// reached, anchor end first, so a move that stays within one unit changes
+/// nothing. Neither matters to a drag by characters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Drag {
+    unit: DragUnit,
+    pressed: (usize, usize),
+    selected: (usize, usize),
+}
+
 /// The main structure for the editor view itself.
 ///
 /// This can be considered to be the data part of the `View`.
@@ -155,6 +177,8 @@ pub struct Editor {
     id: EditorId,
 
     pub active: RwSignal<bool>,
+    /// What the press that made the editor `active` drags.
+    drag: RwSignal<Drag>,
 
     /// Whether you can edit within this editor.
     pub read_only: RwSignal<bool>,
@@ -284,6 +308,7 @@ impl Editor {
             effects_cx: Cell::new(cx.create_child()),
             id,
             active: cx.create_rw_signal(false),
+            drag: cx.create_rw_signal(Drag::default()),
             read_only: cx.create_rw_signal(false),
             doc,
             style,
@@ -592,6 +617,7 @@ impl Editor {
                 pointer_event.modifiers.alt(),
             );
         });
+        self.drag.set(Drag::default());
     }
 
     pub fn double_click(&self, pointer_event: &PointerState) {
@@ -610,6 +636,11 @@ impl Editor {
                 pointer_event.modifiers.alt(),
             );
         });
+        self.drag.set(Drag {
+            unit: DragUnit::Word,
+            pressed: (start, end),
+            selected: (start, end),
+        });
     }
 
     pub fn triple_click(&self, pointer_event: &PointerState) {
@@ -617,9 +648,7 @@ impl Editor {
 
         let mode = self.cursor.with_untracked(|c| c.get_mode());
         let (mouse_offset, ..) = self.offset_of_point(mode, pointer_event.logical_point());
-        let line = self.line_of_offset(mouse_offset);
-        let start = self.offset_of_line(line);
-        let end = self.offset_of_line(line + 1);
+        let (start, end) = self.select_line(mouse_offset);
 
         self.cursor.update(|cursor| {
             cursor.add_region(
@@ -630,18 +659,61 @@ impl Editor {
                 pointer_event.modifiers.alt(),
             )
         });
+        self.drag.set(Drag {
+            unit: DragUnit::Line,
+            pressed: (start, end),
+            selected: (start, end),
+        });
     }
 
+    /// While the button is down, the selection follows the pointer: by
+    /// characters after a click, and by whole words or lines after a double
+    /// or triple click, keeping what the click selected and taking in the
+    /// unit under the pointer, with the cursor at the pointer's side.
     pub fn pointer_move(&self, pointer_event: &PointerState) {
+        if !self.active.get_untracked() {
+            return;
+        }
         let mode = self.cursor.with_untracked(|c| c.get_mode());
         let (offset, _, affinity) = self.offset_of_point(mode, pointer_event.logical_point());
-        if self.active.get_untracked() && self.cursor.with_untracked(|c| c.offset()) != offset {
-            self.commit_preedit();
+        let mut drag = self.drag.get_untracked();
+        let (unit_start, unit_end) = match drag.unit {
+            DragUnit::Char => {
+                if self.cursor.with_untracked(|c| c.offset()) != offset {
+                    self.commit_preedit();
 
-            self.cursor.update(|cursor| {
-                cursor.set_offset(offset, affinity, true, pointer_event.modifiers.alt())
-            });
+                    self.cursor.update(|cursor| {
+                        cursor.set_offset(offset, affinity, true, pointer_event.modifiers.alt())
+                    });
+                }
+                return;
+            }
+            DragUnit::Word => self.select_word(offset),
+            DragUnit::Line => self.select_line(offset),
+        };
+        let (start, end) = drag.pressed;
+        let selected = if offset < start {
+            (end, unit_start)
+        } else if offset >= end {
+            (start, unit_end)
+        } else {
+            drag.pressed
+        };
+        if selected == drag.selected {
+            return;
         }
+        drag.selected = selected;
+        self.commit_preedit();
+
+        self.cursor.update(|cursor| {
+            cursor.set_region(
+                selected.0,
+                selected.1,
+                affinity,
+                pointer_event.modifiers.alt(),
+            )
+        });
+        self.drag.set(drag);
     }
 
     pub fn pointer_up(&self, _pointer_event: &PointerState) {
@@ -881,6 +953,12 @@ impl Editor {
 
     pub fn select_word(&self, offset: usize) -> (usize, usize) {
         self.rope_text().select_word(offset)
+    }
+
+    /// The line `offset` is on, from its start to the start of the next.
+    pub fn select_line(&self, offset: usize) -> (usize, usize) {
+        let line = self.line_of_offset(offset);
+        (self.offset_of_line(line), self.offset_of_line(line + 1))
     }
 
     /// `affinity` decides whether an offset at a soft line break is considered to be on the

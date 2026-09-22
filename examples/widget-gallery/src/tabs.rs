@@ -102,7 +102,7 @@ pub fn tab_view() -> impl IntoView {
                 .padding(5.)
                 .col_gap(5.)
                 .items_center()
-                .align_content(AlignContent::SpaceAround)
+                .align_content(AlignContent::SPACE_AROUND)
         }),
         Stack::new((tabs_view, tabs_content_view)).style(|s| s.height(400.pt()).width(500.pt())),
     ))

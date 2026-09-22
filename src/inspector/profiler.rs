@@ -186,7 +186,7 @@ fn profile_view(profile: &Rc<Profile>) -> impl IntoView {
                             s.selectable(false)
                                 .padding(5.0)
                                 .text_clip()
-                                .align_self(AlignItems::Center)
+                                .align_self(AlignItems::CENTER)
                         }),
                     )
                     .style(move |s| {

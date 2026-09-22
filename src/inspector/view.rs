@@ -317,7 +317,7 @@ fn capture_view(
                     .flex_grow(1.)
                     .grid()
                     .items_center()
-                    .justify_items(AlignItems::Center)
+                    .justify_items(AlignItems::CENTER)
             }),
             tabs,
         ))

@@ -94,7 +94,7 @@ pub fn music_player() -> impl IntoView {
         Container::new(svg(svg::FORWARD)).class(ButtonClass),
     ))
     .style(|s| {
-        s.align_self(floem::taffy::AlignItems::Center)
+        s.align_self(floem::taffy::AlignItems::CENTER)
             .items_center()
             .gap(20)
             .class(SvgClass, |s| s.color(MUSIC_ICON))

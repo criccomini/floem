@@ -14,7 +14,7 @@ pub mod tab_navigation;
 fn list_item<V: IntoView + 'static>(name: String, view_fn: impl Fn() -> V) -> impl IntoView {
     Stack::horizontal((
         name.style(|s| s.width_full()),
-        Container::new(view_fn()).style(|s| s.width_full().justify_content(AlignContent::End)),
+        Container::new(view_fn()).style(|s| s.width_full().justify_content(AlignContent::END)),
     ))
     .style(|s| s.width(250))
 }

@@ -224,7 +224,10 @@ impl StylePropValue for FlexWrap {
 }
 impl StylePropValue for AlignItems {
     fn content_hash(&self) -> u64 {
-        hash_value(&std::mem::discriminant(self))
+        hash_value(&(
+            std::mem::discriminant(&self.keyword),
+            std::mem::discriminant(&self.safety),
+        ))
     }
 }
 impl StylePropValue for BoxSizing {
@@ -234,7 +237,10 @@ impl StylePropValue for BoxSizing {
 }
 impl StylePropValue for AlignContent {
     fn content_hash(&self) -> u64 {
-        hash_value(&std::mem::discriminant(self))
+        hash_value(&(
+            std::mem::discriminant(&self.keyword),
+            std::mem::discriminant(&self.safety),
+        ))
     }
 }
 impl StylePropValue for GridTemplateComponent<String> {}

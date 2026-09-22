@@ -486,13 +486,13 @@ impl ExprStyle {
     }
 
     pub fn items_center(self) -> Self {
-        self.set(AlignItemsProp, Some(AlignItems::Center))
+        self.set(AlignItemsProp, Some(AlignItems::CENTER))
     }
 
     pub fn justify_center(self) -> Self {
         self.set(
             JustifyContentProp,
-            Some(taffy::style::JustifyContent::Center),
+            Some(taffy::style::JustifyContent::CENTER),
         )
     }
 
@@ -3478,57 +3478,57 @@ impl Style {
 
     /// Aligns flex items to stretch and fill the cross axis.
     pub fn items_stretch(self) -> Self {
-        self.align_items(taffy::style::AlignItems::Stretch)
+        self.align_items(taffy::style::AlignItems::STRETCH)
     }
 
     /// Aligns flex items to the start of the cross axis.
     pub fn items_start(self) -> Self {
-        self.align_items(taffy::style::AlignItems::FlexStart)
+        self.align_items(taffy::style::AlignItems::FLEX_START)
     }
 
     /// Defines the alignment along the cross axis as Centered
     pub fn items_center(self) -> Self {
-        self.align_items(taffy::style::AlignItems::Center)
+        self.align_items(taffy::style::AlignItems::CENTER)
     }
 
     /// Aligns flex items to the end of the cross axis.
     pub fn items_end(self) -> Self {
-        self.align_items(taffy::style::AlignItems::FlexEnd)
+        self.align_items(taffy::style::AlignItems::FLEX_END)
     }
 
     /// Aligns flex items along their baselines.
     pub fn items_baseline(self) -> Self {
-        self.align_items(taffy::style::AlignItems::Baseline)
+        self.align_items(taffy::style::AlignItems::BASELINE)
     }
 
     /// Aligns flex items to the start of the main axis.
     pub fn justify_start(self) -> Self {
-        self.justify_content(taffy::style::JustifyContent::FlexStart)
+        self.justify_content(taffy::style::JustifyContent::FLEX_START)
     }
 
     /// Aligns flex items to the end of the main axis.
     pub fn justify_end(self) -> Self {
-        self.justify_content(taffy::style::JustifyContent::FlexEnd)
+        self.justify_content(taffy::style::JustifyContent::FLEX_END)
     }
 
     /// Defines the alignment along the main axis as Centered
     pub fn justify_center(self) -> Self {
-        self.justify_content(taffy::style::JustifyContent::Center)
+        self.justify_content(taffy::style::JustifyContent::CENTER)
     }
 
     /// Distributes flex items with space between them.
     pub fn justify_between(self) -> Self {
-        self.justify_content(taffy::style::JustifyContent::SpaceBetween)
+        self.justify_content(taffy::style::JustifyContent::SPACE_BETWEEN)
     }
 
     /// Distributes flex items with space around them.
     pub fn justify_around(self) -> Self {
-        self.justify_content(taffy::style::JustifyContent::SpaceAround)
+        self.justify_content(taffy::style::JustifyContent::SPACE_AROUND)
     }
 
     /// Distributes flex items with equal space around them.
     pub fn justify_evenly(self) -> Self {
-        self.justify_content(taffy::style::JustifyContent::SpaceEvenly)
+        self.justify_content(taffy::style::JustifyContent::SPACE_EVENLY)
     }
 
     /// Hides the view from view and layout.

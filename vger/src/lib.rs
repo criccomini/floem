@@ -8,8 +8,9 @@ use anyhow::Result;
 use floem_renderer::gpu_resources::GpuResources;
 use floem_renderer::text::{Glyph, GlyphRunProps, NormalizedCoord};
 use floem_renderer::{Img, Renderer, tiny_skia};
+use floem_vger_rs::defs::{LocalPoint, LocalRect, LocalSize};
 use floem_vger_rs::{GlyphImage, Image, PaintIndex, PixelFormat, Vger};
-use peniko::kurbo::{Size, Stroke};
+use peniko::kurbo::{RoundedRect, RoundedRectRadii, Size, Stroke};
 use peniko::{Blob, ImageData, LinearGradientPosition};
 use peniko::{
     BrushRef, Color, GradientKind,
@@ -39,7 +40,7 @@ pub struct VgerRenderer {
     config: SurfaceConfiguration,
     scale: f64,
     transform: Affine,
-    clip: Option<Rect>,
+    clips: Clips,
     capture: bool,
     font_embolden: f32,
     adapter: Adapter,
@@ -116,7 +117,7 @@ impl VgerRenderer {
             scale,
             config,
             transform: Affine::IDENTITY,
-            clip: None,
+            clips: Clips::default(),
             capture: false,
             font_embolden,
             adapter,
@@ -201,6 +202,21 @@ impl VgerRenderer {
 
         let size = (end - origin).to_size();
         floem_vger_rs::defs::LocalRect::new(origin, size)
+    }
+
+    /// Points vger's one scissor at `clip`, in device pixels, or lifts it.
+    fn set_scissor(&mut self, clip: Option<RoundedRect>) {
+        let Some(clip) = clip else {
+            self.vger.reset_scissor();
+            return;
+        };
+        let rect = clip.rect();
+        let origin = LocalPoint::new(rect.x0 as f32, rect.y0 as f32);
+        let size = LocalSize::new(rect.width() as f32, rect.height() as f32);
+        // vger rounds every corner by one radius: the top-left corner's,
+        // as a single clip always has been.
+        self.vger
+            .scissor(LocalRect::new(origin, size), clip.radii().top_left as f32);
     }
 
     fn render_image(&mut self) -> Option<peniko::ImageBrush> {
@@ -320,6 +336,7 @@ impl Renderer for VgerRenderer {
         }
 
         self.transform = Affine::IDENTITY;
+        self.clips.clear();
         self.vger
             .begin(self.config.width as f32, self.config.height as f32, 1.0);
     }
@@ -508,7 +525,7 @@ impl Renderer for VgerRenderer {
         // This assumes that text is axis-aligned.
         let (_, _, scale) = self.scale_components();
 
-        let clip = self.clip;
+        let clip = self.clips.current().map(|clip| clip.rect());
         let Some(font_ref) = FontRef::from_index(font.data.data(), font.index as usize) else {
             return;
         };
@@ -690,26 +707,32 @@ impl Renderer for VgerRenderer {
     }
 
     fn clip(&mut self, shape: &impl Shape) {
-        let (rect, radius) = if let Some(rect) = shape.as_rect() {
-            (rect, 0.0)
+        let (rect, radii) = if let Some(rect) = shape.as_rect() {
+            (rect, RoundedRectRadii::from_single_radius(0.0))
         } else if let Some(rect) = shape.as_rounded_rect() {
-            (rect.rect(), rect.radii().top_left)
+            (rect.rect(), rect.radii())
         } else {
-            (shape.bounding_box(), 0.0)
+            (
+                shape.bounding_box(),
+                RoundedRectRadii::from_single_radius(0.0),
+            )
         };
 
         let (_, _, scale) = self.scale_components();
-        self.vger
-            .scissor(self.vger_rect(rect), (radius * scale) as f32);
-
-        let transformed_rect = self.device_transform().transform_rect_bbox(rect);
-
-        self.clip = Some(transformed_rect);
+        let rect = self.device_transform().transform_rect_bbox(rect);
+        let radii = RoundedRectRadii::new(
+            radii.top_left * scale,
+            radii.top_right * scale,
+            radii.bottom_right * scale,
+            radii.bottom_left * scale,
+        );
+        let clip = self.clips.push(RoundedRect::from_rect(rect, radii));
+        self.set_scissor(Some(clip));
     }
 
     fn clear_clip(&mut self) {
-        self.vger.reset_scissor();
-        self.clip = None;
+        let clip = self.clips.pop();
+        self.set_scissor(clip);
     }
 
     fn finish(&mut self) -> Option<peniko::ImageBrush> {
@@ -800,9 +823,87 @@ fn glyph_font_key(blob_id: u64, index: u32, coords: &[NormalizedCoord], hint: bo
     hasher.finish()
 }
 
+/// The clips in force while a frame paints, outermost first, in device
+/// pixels.
+///
+/// vger has one scissor. Setting it for a clip used to replace the clip
+/// around it, and clearing it left no clip at all, so a clip only held
+/// until the first clip inside it came and went: after a clipped view in
+/// a scroll, the rest of the scroll's content painted past its viewport,
+/// and an image that clips itself painted past the rounded clip around
+/// it. Here each clip is cut to the one it is in, and clearing it puts
+/// that one back, as the other renderers' clip stacks do.
+#[derive(Default)]
+struct Clips(Vec<RoundedRect>);
+
+impl Clips {
+    /// Pushes `clip` cut to the innermost clip, and returns what it became.
+    fn push(&mut self, clip: RoundedRect) -> RoundedRect {
+        let clip = match self.current() {
+            Some(outer) => cut(clip, outer),
+            None => clip,
+        };
+        self.0.push(clip);
+        clip
+    }
+
+    /// Pops the innermost clip, and returns the one it was in.
+    fn pop(&mut self) -> Option<RoundedRect> {
+        self.0.pop();
+        self.current()
+    }
+
+    fn current(&self) -> Option<RoundedRect> {
+        self.0.last().copied()
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// The part of `inner` inside `outer`. A corner of it keeps the radius of
+/// the clip it is a corner of, the larger one where it is a corner of
+/// both, and is square where one clip cuts the other.
+fn cut(inner: RoundedRect, outer: RoundedRect) -> RoundedRect {
+    let rect = inner.rect().intersect(outer.rect());
+    let mut kept = [0.0; 4];
+    for clip in [inner, outer] {
+        let (theirs, radii) = (corners(clip.rect()), clip.radii());
+        let radii = [
+            radii.top_left,
+            radii.top_right,
+            radii.bottom_right,
+            radii.bottom_left,
+        ];
+        for (i, corner) in corners(rect).into_iter().enumerate() {
+            if corner.distance(theirs[i]) < 1e-3 {
+                kept[i] = f64::max(kept[i], radii[i]);
+            }
+        }
+    }
+    let [top_left, top_right, bottom_right, bottom_left] = kept;
+    RoundedRect::from_rect(
+        rect,
+        RoundedRectRadii::new(top_left, top_right, bottom_right, bottom_left),
+    )
+}
+
+/// Top left, top right, bottom right, bottom left.
+fn corners(rect: Rect) -> [Point; 4] {
+    [
+        Point::new(rect.x0, rect.y0),
+        Point::new(rect.x1, rect.y0),
+        Point::new(rect.x1, rect.y1),
+        Point::new(rect.x0, rect.y1),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{glyph_font_key, scaled_embolden_strength};
+    use peniko::kurbo::{Rect, RoundedRect, RoundedRectRadii};
+
+    use super::{Clips, glyph_font_key, scaled_embolden_strength};
 
     #[test]
     fn faces_of_one_file_and_settings_of_one_face_cache_apart() {
@@ -818,6 +919,54 @@ mod tests {
         );
         assert_ne!(regular, glyph_font_key(7, 0, &[], true));
         assert_ne!(regular, glyph_font_key(8, 0, &[], false));
+    }
+
+    fn clip(x0: f64, y0: f64, x1: f64, y1: f64, radius: f64) -> RoundedRect {
+        RoundedRect::new(x0, y0, x1, y1, radius)
+    }
+
+    /// A scroll's viewport with a clipped view in it, then a sibling after
+    /// it: the view's clip is cut to the viewport, and clearing it puts
+    /// the viewport back for the sibling rather than lifting every clip.
+    #[test]
+    fn clearing_a_nested_clip_restores_the_one_around_it() {
+        let mut clips = Clips::default();
+        let viewport = clip(0.0, 100.0, 400.0, 800.0, 0.0);
+        assert_eq!(clips.push(viewport), viewport);
+
+        let inner = clips.push(clip(10.0, 90.0, 50.0, 130.0, 0.0));
+        assert_eq!(inner.rect(), Rect::new(10.0, 100.0, 50.0, 130.0));
+
+        assert_eq!(clips.pop(), Some(viewport));
+        assert_eq!(clips.current(), Some(viewport));
+        assert_eq!(clips.pop(), None);
+        assert_eq!(
+            clips.pop(),
+            None,
+            "an extra clear lifts nothing it should not"
+        );
+    }
+
+    /// An image that clips itself to its own box, inside a circular clip
+    /// of the same box: the circle holds.
+    #[test]
+    fn a_clip_inside_a_rounded_clip_of_the_same_box_stays_round() {
+        let mut clips = Clips::default();
+        clips.push(clip(10.0, 10.0, 32.0, 32.0, 11.0));
+        let image = clips.push(clip(10.0, 10.0, 32.0, 32.0, 0.0));
+        assert_eq!(image.rect(), Rect::new(10.0, 10.0, 32.0, 32.0));
+        assert_eq!(image.radii(), RoundedRectRadii::from_single_radius(11.0));
+    }
+
+    /// Where one clip cuts another, the cut corners are square and the
+    /// whole ones keep their radius.
+    #[test]
+    fn a_cut_clip_keeps_only_its_whole_corners_rounded() {
+        let mut clips = Clips::default();
+        clips.push(clip(0.0, 0.0, 400.0, 50.0, 0.0));
+        let avatar = clips.push(clip(10.0, 40.0, 32.0, 62.0, 11.0));
+        assert_eq!(avatar.rect(), Rect::new(10.0, 40.0, 32.0, 50.0));
+        assert_eq!(avatar.radii(), RoundedRectRadii::new(5.0, 5.0, 0.0, 0.0));
     }
 
     #[test]

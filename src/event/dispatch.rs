@@ -512,6 +512,9 @@ pub(crate) struct RouteCx<'r, 'w> {
     pub source: ElementId,
     /// The event that caused this one, if synthetic.
     pub triggered_by: Option<&'r Event>,
+    /// Hover transitions generated during dispatch. Each gets its own `RouteCx`, before
+    /// `pending_events` and in the order they were generated.
+    pending_hover_events: SmallVec<[(RouteKind, Event); 8]>,
     /// Events generated during dispatch that will each get their own `RouteCx`.
     pending_events: SmallVec<[(RouteKind, Event); 8]>,
     /// Events generated during dispatch that will each get their own `RouteCx` that are preventable with `prevent_default`.
@@ -573,6 +576,7 @@ impl<'r, 'w> RouteCx<'r, 'w> {
             dispatch,
             source,
             triggered_by,
+            pending_hover_events: SmallVec::new(),
             pending_events: SmallVec::new(),
             pending_default_events: SmallVec::new(),
             finished: false,
@@ -595,6 +599,7 @@ impl<'r, 'w> RouteCx<'r, 'w> {
             dispatch: None,
             source,
             triggered_by: None,
+            pending_hover_events: SmallVec::new(),
             pending_events: SmallVec::new(),
             pending_default_events: SmallVec::new(),
             finished: false,
@@ -615,6 +620,7 @@ impl<'r, 'w> RouteCx<'r, 'w> {
             dispatch: None,
             source,
             triggered_by: None,
+            pending_hover_events: SmallVec::new(),
             pending_events: SmallVec::new(),
             pending_default_events: SmallVec::new(),
             finished: false,
@@ -1072,7 +1078,15 @@ impl RouteCx<'_, '_> {
 
     /// Flush all pending events. Each gets its own [`RouteCx`] scope (and thus
     /// its own lifecycle), with the current event as `triggered_by`.
+    ///
+    /// Hover transitions go first, in the order they were generated: the views the
+    /// pointer left, innermost first, then the views it entered, outermost first.
+    /// The other queues go newest first (a DoubleClick before its Click).
     fn flush_pending_events(&mut self) {
+        let pending = std::mem::take(&mut self.pending_hover_events);
+        for (kind, event) in pending {
+            self.route_synthetic(kind, event);
+        }
         let pending = std::mem::take(&mut self.pending_events);
         for (kind, event) in pending.into_iter().rev() {
             self.route_synthetic(kind, event);
@@ -1966,7 +1980,7 @@ impl RouteCx<'_, '_> {
             }
             let enter_events = self.gcx.window_state.hover_state.update_path(path);
             Self::push_hover_events(
-                &mut self.pending_events,
+                &mut self.pending_hover_events,
                 enter_events,
                 false,
                 self.gcx.window_state,
@@ -1975,23 +1989,40 @@ impl RouteCx<'_, '_> {
             // Drag start: pointer leaves then file-drag enters.
             let leave_events = self.gcx.window_state.hover_state.update_path(&[]);
             Self::push_hover_events(
-                &mut self.pending_events,
+                &mut self.pending_hover_events,
                 leave_events,
                 false,
                 self.gcx.window_state,
             );
             let enter_events = self.gcx.window_state.hover_state.update_path(path);
             Self::push_hover_events(
-                &mut self.pending_events,
+                &mut self.pending_hover_events,
                 enter_events,
                 true,
                 self.gcx.window_state,
             );
         } else {
+            let old_path: SmallVec<[ElementId; 16]> = self
+                .gcx
+                .window_state
+                .hover_state
+                .current_path()
+                .iter()
+                .copied()
+                .collect();
             let events = self.gcx.window_state.hover_state.update_path(path);
+            // `update_path` leaves and re-enters every view past the first place the old
+            // and new paths differ. A hover path skips the ancestors whose own box does
+            // not hold the pointer, so crossing the edge of a view that a descendant
+            // hangs out of changes the path above views still under the pointer. They
+            // stay hovered, so they get neither event.
+            let events = events.into_iter().filter(|event| match event {
+                HoverEvent::Leave(target) => !path.contains(target),
+                HoverEvent::Enter(target) => !old_path.contains(target),
+            });
             let use_file_drag = self.gcx.window_state.file_drag_paths.is_some();
             Self::push_hover_events(
-                &mut self.pending_events,
+                &mut self.pending_hover_events,
                 events,
                 use_file_drag,
                 self.gcx.window_state,

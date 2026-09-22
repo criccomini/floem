@@ -371,7 +371,24 @@ impl TextLayoutState {
 
                 let text_size = {
                     let mut layout_data = layout_data.borrow_mut();
-                    layout_data.compute_overflow_size(width_constraint, text_overflow)
+                    let size = layout_data.compute_overflow_size(width_constraint, text_overflow);
+                    // Unless its width is known, the node takes the width
+                    // measured here, so the height has to be the text's at
+                    // that width. Wrapped text comes out wider than the
+                    // constraint when a word does not fit in it, as every
+                    // word does not at the min-content probe's 5px, and at
+                    // the word's width the other words share lines they
+                    // did not at the constraint. Taffy's cache hands this
+                    // size to a later query at exactly this width.
+                    match (known_dimensions.width, width_constraint, text_overflow) {
+                        (None, Some(constraint), TextOverflow::Wrap { .. })
+                            if size.width as f32 > constraint =>
+                        {
+                            layout_data
+                                .compute_overflow_size(Some(size.width as f32), text_overflow)
+                        }
+                        _ => size,
+                    }
                 };
 
                 Size {

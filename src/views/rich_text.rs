@@ -64,8 +64,15 @@ impl RichText {
         let taffy_node = self.id.taffy_node();
         let taffy = self.id.taffy();
         let mut taffy = taffy.borrow_mut();
+        // As a text input's, the text may be narrower than its longest
+        // word, which then runs past the end of its own line, so the rest
+        // wraps at the view's width rather than at the word's.
         let text_node = taffy
             .new_leaf(taffy::Style {
+                min_size: taffy::Size {
+                    width: taffy::Dimension::length(0.),
+                    height: taffy::Dimension::auto(),
+                },
                 ..taffy::Style::DEFAULT
             })
             .unwrap();

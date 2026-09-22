@@ -30,6 +30,8 @@ use crate::{
     window::WindowState,
 };
 
+/// The clock that both a press and its release are stamped from. `ClickState`
+/// subtracts one stamp from the other, so the two must share a start.
 static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// A single step in a capture/target/bubble dispatch sequence.
@@ -2057,8 +2059,6 @@ impl RouteCx<'_, '_> {
     }
 
     fn handle_pointer_state_updates(&mut self) {
-        static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
-
         // Handle keyboard "active" trigger behavior for focused elements.
         // This implements a *toggle-on-repeat* model:
         //

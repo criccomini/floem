@@ -546,6 +546,14 @@ impl Renderer for VgerRenderer {
             .glyph_transform
             .map(|transform| transform.as_coeffs()[0].atan().to_degrees() as f32);
         let embolden = scaled_embolden_strength(self.font_embolden, scale);
+        let raster = GlyphRaster {
+            font: font_ref,
+            size: props.font_size * scale as f32,
+            hint: props.hint,
+            coords: props.normalized_coords,
+            embolden,
+            skew,
+        };
 
         for glyph in glyphs {
             let glyph_x = pos.x as f32 + glyph.x * scale as f32;
@@ -558,68 +566,20 @@ impl Renderer for VgerRenderer {
             }
 
             let scaled_font_size = (props.font_size * scale as f32).round() as u32;
-
-            let x_bin = ((glyph_x.fract() + 1.0).fract() * 4.0).min(3.0) as u8;
-            let y_bin = ((glyph_y.fract() + 1.0).fract() * 4.0).min(3.0) as u8;
-
+            let (x, y, x_bin) = glyph_raster_position(glyph_x, glyph_y);
             let glyph_id = glyph.id as u16;
-            let scaled_size = props.font_size * scale as f32;
-            let coords = props.normalized_coords;
 
             let synthesis_bits = skew.unwrap_or(0.0).to_bits() & 0xFFFF_FFFE;
 
             self.vger.render_glyph(
-                glyph_x.floor(),
-                glyph_y.floor(),
+                x,
+                y,
                 font_key,
                 glyph_id,
                 scaled_font_size,
-                (x_bin, y_bin),
+                (x_bin, 0),
                 synthesis_bits,
-                || {
-                    let image = SCALE_CONTEXT.with_borrow_mut(|ctx| {
-                        let mut scaler = ctx
-                            .builder(font_ref)
-                            .size(scaled_size)
-                            .hint(props.hint)
-                            .normalized_coords(coords)
-                            .build();
-                        let mut render = Render::new(&[
-                            Source::ColorOutline(0),
-                            Source::ColorBitmap(StrikeWith::BestFit),
-                            Source::Outline,
-                        ]);
-                        render
-                            .format(Format::Alpha)
-                            .offset(swash::zeno::Vector::new(glyph_x.fract(), glyph_y.fract()))
-                            .embolden(embolden);
-                        if let Some(angle) = skew {
-                            render.transform(Some(swash::zeno::Transform::skew(
-                                swash::zeno::Angle::from_degrees(angle),
-                                swash::zeno::Angle::ZERO,
-                            )));
-                        }
-                        render.render(&mut scaler, glyph_id)
-                    });
-                    match image {
-                        Some(img) => GlyphImage {
-                            colored: img.content != swash::scale::image::Content::Mask,
-                            data: img.data.into(),
-                            width: img.placement.width,
-                            height: img.placement.height,
-                            left: img.placement.left,
-                            top: img.placement.top,
-                        },
-                        None => GlyphImage {
-                            data: Blob::new(Arc::new([])),
-                            width: 0,
-                            height: 0,
-                            left: 0,
-                            top: 0,
-                            colored: false,
-                        },
-                    }
-                },
+                || raster.rasterize(glyph_id, x_bin),
                 paint,
             );
         }
@@ -899,11 +859,139 @@ fn corners(rect: Rect) -> [Point; 4] {
     ]
 }
 
+/// Where a glyph whose origin is at `(x, y)` is drawn from, in whole
+/// device pixels, and the quarter of a pixel it is rasterized at across,
+/// which is also its subpixel bin in vger's atlas.
+///
+/// Across, the glyph keeps its position to the nearest quarter pixel, so
+/// a line keeps the spacing it was laid out with. The whole pixel is the
+/// one at or left of that quarter, for a position left of zero as for
+/// one right of it: `fract()` is negative there, and paired with
+/// `floor()` it put a glyph a pixel away from where its bin said.
+///
+/// Down, the baseline is rounded to a whole pixel, as it was before text
+/// was laid out with parley. Every glyph on a line shares its y, so they
+/// all land on one row, and a stroke along the baseline or the x-height
+/// covers a row of pixels rather than half of two.
+fn glyph_raster_position(x: f32, y: f32) -> (f32, f32, u8) {
+    let quarters = (x * 4.0).round();
+    let whole = (quarters / 4.0).floor();
+    let bin = (quarters - whole * 4.0) as u8;
+    (whole, y.round(), bin)
+}
+
+/// What a run's glyph bitmaps are rasterized with, besides the glyph and
+/// its subpixel bin.
+struct GlyphRaster<'a> {
+    font: FontRef<'a>,
+    size: f32,
+    hint: bool,
+    coords: &'a [NormalizedCoord],
+    embolden: f32,
+    skew: Option<f32>,
+}
+
+impl GlyphRaster<'_> {
+    /// The glyph's bitmap for vger to cache and place, rasterized `x_bin`
+    /// quarters of a pixel right of its origin. It depends on the bin
+    /// alone, not on the position that asked for it: vger keeps the first
+    /// bitmap made for a bin and hands it to every later draw in that bin.
+    /// Nothing is offset down, the baseline being on a whole pixel
+    /// already; should it ever be, swash's y axis points up.
+    fn rasterize(&self, glyph_id: u16, x_bin: u8) -> GlyphImage {
+        let image = SCALE_CONTEXT.with_borrow_mut(|ctx| {
+            let mut scaler = ctx
+                .builder(self.font)
+                .size(self.size)
+                .hint(self.hint)
+                .normalized_coords(self.coords)
+                .build();
+            let mut render = Render::new(&[
+                Source::ColorOutline(0),
+                Source::ColorBitmap(StrikeWith::BestFit),
+                Source::Outline,
+            ]);
+            render
+                .format(Format::Alpha)
+                .offset(swash::zeno::Vector::new(f32::from(x_bin) / 4.0, 0.0))
+                .embolden(self.embolden);
+            if let Some(angle) = self.skew {
+                render.transform(Some(swash::zeno::Transform::skew(
+                    swash::zeno::Angle::from_degrees(angle),
+                    swash::zeno::Angle::ZERO,
+                )));
+            }
+            render.render(&mut scaler, glyph_id)
+        });
+        match image {
+            Some(img) => GlyphImage {
+                colored: img.content != swash::scale::image::Content::Mask,
+                data: img.data.into(),
+                width: img.placement.width,
+                height: img.placement.height,
+                left: img.placement.left,
+                top: img.placement.top,
+            },
+            None => GlyphImage {
+                data: Blob::new(Arc::new([])),
+                width: 0,
+                height: 0,
+                left: 0,
+                top: 0,
+                colored: false,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use peniko::kurbo::{Rect, RoundedRect, RoundedRectRadii};
+    use std::ops::RangeInclusive;
 
-    use super::{Clips, glyph_font_key, scaled_embolden_strength};
+    use peniko::kurbo::{Rect, RoundedRect, RoundedRectRadii};
+    use swash::FontRef;
+
+    use super::{
+        Clips, GlyphRaster, glyph_font_key, glyph_raster_position, scaled_embolden_strength,
+    };
+
+    const FIRA_SANS: &[u8] = include_bytes!("../../examples/webgpu/fonts/FiraSans-Medium.ttf");
+
+    fn fira_sans() -> FontRef<'static> {
+        FontRef::from_index(FIRA_SANS, 0).unwrap()
+    }
+
+    fn raster(font: FontRef<'_>) -> GlyphRaster<'_> {
+        GlyphRaster {
+            font,
+            size: 14.0,
+            hint: false,
+            coords: &[],
+            embolden: 0.0,
+            skew: None,
+        }
+    }
+
+    /// The glyph drawn at `(x, y)` as `draw_glyphs` draws it, a bitmap
+    /// vger places `left` right of and `top` above the pixel it is given:
+    /// the screen rows its ink covers, and where its ink starts across on
+    /// its middle row. A vertical edge covers the first pixel it crosses
+    /// by the part of it right of the edge, so that pixel's coverage
+    /// places the edge within it.
+    fn drawn(raster: &GlyphRaster, glyph: u16, x: f32, y: f32) -> (RangeInclusive<i32>, f32) {
+        let (px, py, bin) = glyph_raster_position(x, y);
+        let image = raster.rasterize(glyph, bin);
+        let top = py as i32 - image.top;
+        let rows: Vec<&[u8]> = image.data.data().chunks(image.width as usize).collect();
+        let inked: Vec<i32> = (0..rows.len())
+            .filter(|&r| rows[r].iter().any(|&a| a > 0))
+            .map(|r| top + r as i32)
+            .collect();
+        let middle = rows[rows.len() / 2];
+        let first = middle.iter().position(|&a| a > 0).unwrap();
+        let edge = px + image.left as f32 + first as f32 + 1.0 - f32::from(middle[first]) / 255.0;
+        (inked[0]..=inked[inked.len() - 1], edge)
+    }
 
     #[test]
     fn faces_of_one_file_and_settings_of_one_face_cache_apart() {
@@ -973,5 +1061,59 @@ mod tests {
     fn embolden_strength_scales_with_raster_scale() {
         assert!((scaled_embolden_strength(0.2, 1.5) - 0.3).abs() < f32::EPSILON);
         assert_eq!(scaled_embolden_strength(0.2, 0.0), 0.0);
+    }
+
+    #[test]
+    fn a_glyph_is_placed_at_its_nearest_quarter_across_and_whole_pixel_down() {
+        assert_eq!(glyph_raster_position(10.3, 40.4), (10.0, 40.0, 1));
+        assert_eq!(glyph_raster_position(10.9, 40.6), (11.0, 41.0, 0));
+        // Left of zero and above it, where `fract()` is negative.
+        assert_eq!(glyph_raster_position(-3.7, -3.6), (-4.0, -4.0, 1));
+        assert_eq!(glyph_raster_position(-3.3, -3.4), (-4.0, -3.0, 3));
+        for step in -2000..2000 {
+            let x = step as f32 / 100.0;
+            let (whole, _, bin) = glyph_raster_position(x, 0.0);
+            assert!(bin < 4, "{x}: bin {bin}");
+            let placed = whole + f32::from(bin) / 4.0;
+            assert!(
+                (placed - x).abs() <= 0.125 + 1e-4,
+                "{x}: placed at {placed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_glyph_sits_on_its_baseline_rounded_to_a_whole_pixel() {
+        let font = fira_sans();
+        let raster = raster(font);
+        let stem = font.charmap().map('I');
+        // An I stands on the baseline, so its last row of ink is the one
+        // just above the baseline rounded, on the screen and above its top
+        // alike. Each draw here makes the bitmap it uses, as the first
+        // draw in a bin does in vger's atlas; before, a bitmap made above
+        // the top came out a pixel lower than one made on the screen.
+        for y in [40.0, 40.25, 40.4, 40.6, 40.75, -3.4, -3.6, -4.0] {
+            let (rows, _) = drawn(&raster, stem, 10.0, y);
+            assert_eq!(*rows.end(), y.round() as i32 - 1, "baseline at {y}");
+        }
+    }
+
+    #[test]
+    fn a_glyph_keeps_its_quarter_pixel_across() {
+        let font = fira_sans();
+        let raster = raster(font);
+        let stem = font.charmap().map('I');
+        for x in [10.0, -4.0] {
+            let (_, at) = drawn(&raster, stem, x, 20.0);
+            for quarter in 1..=4 {
+                let along = quarter as f32 / 4.0;
+                let (_, moved) = drawn(&raster, stem, x + along, 20.0);
+                assert!(
+                    (moved - at - along).abs() < 0.02,
+                    "{x} + {along}: the stem moved {}",
+                    moved - at
+                );
+            }
+        }
     }
 }

@@ -525,7 +525,21 @@ impl DragTracker {
             }
 
             // Update hover state and generate Enter/Leave events
+            let old_path: Vec<ElementId> = self.hover_state.current_path().to_vec();
             let hover_events = self.hover_state.update_path(hover_path);
+            // `update_path` leaves and re-enters everything past the first place the
+            // old and new paths differ, and the path is every view under the pointer,
+            // so a change above a target (the pointer crossing the edge of a view the
+            // target hangs out of) would leave and re-enter it. A target that stays
+            // under the pointer gets neither event.
+            let hover_events = hover_events.into_iter().filter(|event| match event {
+                understory_event_state::hover::HoverEvent::Leave(target) => {
+                    !hover_path.contains(target)
+                }
+                understory_event_state::hover::HoverEvent::Enter(target) => {
+                    !old_path.contains(target)
+                }
+            });
             for hover_event in hover_events {
                 match hover_event {
                     understory_event_state::hover::HoverEvent::Enter(drop_target) => {

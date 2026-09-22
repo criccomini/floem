@@ -5,17 +5,23 @@ use floem_reactive::Effect;
 use peniko::kurbo::{Affine, Axis, Point, Rect, RoundedRect, RoundedRectRadii, Stroke, Vec2};
 use peniko::{Brush, Color};
 use std::time::Duration;
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 use taffy::Overflow;
 use ui_events::pointer::{PointerButton, PointerEvent, PointerId};
 
+use crate::action::{TimerToken, exec_after, exec_after_animation_frame};
 use crate::easing::Linear;
 use crate::event::{
     DragEvent, DragSourceEvent, PointerCaptureEvent, PointerScrollEventExt, RouteKind, ScrollTo,
 };
+use crate::platform::Instant;
 use crate::prelude::EventListenerTrait;
 use crate::prelude::el::UpdatePhaseLayout;
 use crate::style::ScrollbarWidth;
+use crate::window::handle::{get_current_view, set_current_view};
 use crate::{
     BoxTree, ElementId, Renderer,
     context::{EventCx, PaintCx, StyleCx},
@@ -249,7 +255,7 @@ impl ScrollHandle {
             .set_flags(self.element_id.0, NodeFlags::VISIBLE | NodeFlags::PICKABLE);
     }
 
-    fn paint(&self, cx: &mut PaintCx) {
+    fn paint(&self, cx: &mut PaintCx, alpha: f32) {
         let box_tree = self.box_tree.borrow();
         let rect = box_tree.local_bounds(self.element_id.0).unwrap_or_default();
 
@@ -291,14 +297,22 @@ impl ScrollHandle {
 
         cx.fill(
             &rounded_rect,
-            &self.style.background().unwrap_or(HANDLE_COLOR),
+            &self
+                .style
+                .background()
+                .unwrap_or(HANDLE_COLOR)
+                .multiply_alpha(alpha),
             0.0,
         );
 
         if edge_width > 0.0
             && let Some(color) = self.style.border_color().right
         {
-            cx.stroke(&rounded_rect, &color, &Stroke::new(edge_width));
+            cx.stroke(
+                &rounded_rect,
+                &color.multiply_alpha(alpha),
+                &Stroke::new(edge_width),
+            );
         }
     }
 }
@@ -436,12 +450,12 @@ impl ScrollTrack {
             .set_flags(self.element_id.0, NodeFlags::VISIBLE | NodeFlags::PICKABLE);
     }
 
-    fn paint(&self, cx: &mut PaintCx) {
+    fn paint(&self, cx: &mut PaintCx, alpha: f32) {
         let box_tree = self.box_tree.borrow();
         let rect = box_tree.local_bounds(self.element_id.0).unwrap_or_default();
 
         if let Some(color) = self.style.background() {
-            cx.fill(&rect, &color, 0.0);
+            cx.fill(&rect, &color.multiply_alpha(alpha), 0.0);
         }
     }
 }
@@ -516,7 +530,8 @@ prop!(
 );
 
 prop!(
-    /// Controls whether scroll bars are shown when not scrolling. When false, bars are only shown during scroll interactions.
+    /// Controls whether scroll bars are shown when not scrolling. When false, the bars show
+    /// when the user scrolls and while the pointer is on one, and fade out once scrolling stops.
     pub ShowBarsWhenIdle: bool {} = true
 );
 
@@ -544,6 +559,96 @@ prop_extractor!(ScrollStyle {
 
 const HANDLE_COLOR: Brush = Brush::Solid(Color::from_rgba8(0, 0, 0, 120));
 
+/// How long the bars of a scroll that hides them while idle stay after the
+/// last scroll, before they start to fade.
+const IDLE_HOLD: Duration = Duration::from_millis(700);
+/// How long those bars take to fade out.
+const IDLE_FADE: Duration = Duration::from_millis(300);
+
+/// When the bars show, for a scroll with [`ShowBarsWhenIdle`] false: for
+/// [`IDLE_HOLD`] after the user scrolls, by the wheel, the handle or the
+/// track, or the pointer enters or leaves a bar, then fading out over
+/// [`IDLE_FADE`], and all the while the pointer is on a bar or drags one.
+#[derive(Debug, Default)]
+struct IdleFade {
+    last_activity: Option<Instant>,
+    dragging: bool,
+    /// A timer or an animation frame is on its way to paint the bars again.
+    wake_pending: Rc<Cell<bool>>,
+}
+
+/// What the bars need next to fade.
+#[derive(Debug, PartialEq)]
+enum Wake {
+    /// Nothing: they show for as long as they are held, or are gone.
+    None,
+    /// A paint after this long, when the fade starts.
+    After(Duration),
+    /// A paint on the next frame, while they fade.
+    NextFrame,
+}
+
+impl IdleFade {
+    fn reveal(&mut self) {
+        self.last_activity = Some(Instant::now());
+    }
+
+    fn idle(&self, now: Instant) -> Option<Duration> {
+        self.last_activity
+            .map(|last| now.saturating_duration_since(last))
+    }
+
+    /// The bars' opacity at `now`, whole while they are `held`.
+    fn alpha(&self, now: Instant, held: bool) -> f32 {
+        if held {
+            return 1.0;
+        }
+        match self.idle(now) {
+            None => 0.0,
+            Some(idle) if idle < IDLE_HOLD => 1.0,
+            Some(idle) => {
+                let faded = (idle - IDLE_HOLD).as_secs_f32() / IDLE_FADE.as_secs_f32();
+                (1.0 - faded).max(0.0)
+            }
+        }
+    }
+
+    fn wake(&self, now: Instant, held: bool) -> Wake {
+        if held {
+            return Wake::None;
+        }
+        match self.idle(now) {
+            Some(idle) if idle < IDLE_HOLD => Wake::After(IDLE_HOLD - idle),
+            Some(idle) if idle < IDLE_HOLD + IDLE_FADE => Wake::NextFrame,
+            _ => Wake::None,
+        }
+    }
+
+    /// Asks for a paint of `id` when the bars next change, unless one is
+    /// already on its way.
+    fn schedule(&self, id: ViewId, wake: Wake) {
+        if wake == Wake::None || self.wake_pending.get() {
+            return;
+        }
+        let pending = self.wake_pending.clone();
+        let paint = move |_| {
+            pending.set(false);
+            id.request_paint();
+        };
+        // The timers take their window from the current view.
+        let current = get_current_view();
+        set_current_view(id);
+        let token = match wake {
+            Wake::After(after) => exec_after(after, paint),
+            _ => exec_after_animation_frame(paint),
+        };
+        set_current_view(current);
+        if token != TimerToken::INVALID {
+            self.wake_pending.set(true);
+        }
+    }
+}
+
 style_class!(
     /// Style class that is applied to every scroll view
     pub ScrollClass
@@ -560,6 +665,7 @@ pub struct Scroll {
     v_track: ScrollTrack,
     h_track: ScrollTrack,
     scroll_style: ScrollStyle,
+    fade: IdleFade,
 }
 
 /// Create a new scroll view
@@ -600,6 +706,7 @@ impl Scroll {
             v_handle,
             h_handle,
             scroll_style: Default::default(),
+            fade: Default::default(),
         }
         .class(ScrollClass)
     }
@@ -838,6 +945,51 @@ impl Scroll {
         }
     }
 
+    fn is_bar(&self, element_id: ElementId) -> bool {
+        [
+            self.v_handle.element_id,
+            self.h_handle.element_id,
+            self.v_track.element_id,
+            self.h_track.element_id,
+        ]
+        .contains(&element_id)
+    }
+
+    /// Scrolls to where a drag of a handle or a click on a track asks.
+    fn scroll_by_bar(&mut self, cx: &mut EventCx, result: ScrollEventResult) -> EventPropagation {
+        if let Some(new_offset) = result.new_offset
+            && self
+                .apply_scroll_delta(new_offset - self.scroll_offset)
+                .is_some()
+        {
+            self.fade.reveal();
+            cx.window_state.request_paint(self.id);
+        }
+        result.propagation
+    }
+
+    /// The bars' opacity for this paint.
+    fn bar_alpha(&self, cx: &PaintCx) -> f32 {
+        if self.scroll_style.hide_bar() {
+            return 0.0;
+        }
+        if self.scroll_style.show_bars_when_idle() {
+            return 1.0;
+        }
+        let held = self.fade.dragging
+            || [
+                self.v_handle.element_id,
+                self.h_handle.element_id,
+                self.v_track.element_id,
+                self.h_track.element_id,
+            ]
+            .into_iter()
+            .any(|e| cx.window_state.is_hovered(e));
+        let now = Instant::now();
+        self.fade.schedule(self.id, self.fade.wake(now, held));
+        self.fade.alpha(now, held)
+    }
+
     fn set_positions(&mut self) {
         let viewport = self.id.get_content_rect_local();
         let full_rect = self.id.get_layout_rect_local();
@@ -905,7 +1057,9 @@ impl View for Scroll {
                     self.do_ensure_visible(rect);
                 }
                 ScrollState::ScrollDelta(delta) => {
-                    self.apply_scroll_delta(delta);
+                    if self.apply_scroll_delta(delta).is_some() {
+                        self.fade.reveal();
+                    }
                 }
                 ScrollState::ScrollTo(origin) => {
                     self.do_scroll_to(origin);
@@ -968,49 +1122,43 @@ impl View for Scroll {
         }
         // Handle events targeted at our visual IDs (handles and tracks)
         if cx.phase == Phase::Target {
+            if self.is_bar(cx.target)
+                && matches!(
+                    &cx.event,
+                    Event::Pointer(PointerEvent::Enter(_) | PointerEvent::Leave(_))
+                )
+            {
+                self.fade.reveal();
+                cx.window_state.request_paint(self.id);
+            }
+            if cx.target == self.v_handle.element_id || cx.target == self.h_handle.element_id {
+                match &cx.event {
+                    Event::PointerCapture(PointerCaptureEvent::Gained(_)) => {
+                        self.fade.dragging = true;
+                    }
+                    Event::PointerCapture(PointerCaptureEvent::Lost(_)) => {
+                        self.fade.dragging = false;
+                        self.fade.reveal();
+                        cx.window_state.request_paint(self.id);
+                    }
+                    _ => {}
+                }
+            }
             if cx.target == self.v_handle.element_id {
                 let result = self.v_handle.event(cx, self.id, self.child);
-                if let Some(new_offset) = result.new_offset
-                    && self
-                        .apply_scroll_delta(new_offset - self.scroll_offset)
-                        .is_some()
-                {
-                    cx.window_state.request_paint(self.id);
-                }
-                return result.propagation;
+                return self.scroll_by_bar(cx, result);
             }
             if cx.target == self.h_handle.element_id {
                 let result = self.h_handle.event(cx, self.id, self.child);
-                if let Some(new_offset) = result.new_offset
-                    && self
-                        .apply_scroll_delta(new_offset - self.scroll_offset)
-                        .is_some()
-                {
-                    cx.window_state.request_paint(self.id);
-                }
-                return result.propagation;
+                return self.scroll_by_bar(cx, result);
             }
             if cx.target == self.v_track.element_id {
                 let result = self.v_track.event(cx, self.id, self.child);
-                if let Some(new_offset) = result.new_offset
-                    && self
-                        .apply_scroll_delta(new_offset - self.scroll_offset)
-                        .is_some()
-                {
-                    cx.window_state.request_paint(self.id);
-                }
-                return result.propagation;
+                return self.scroll_by_bar(cx, result);
             }
             if cx.target == self.h_track.element_id {
                 let result = self.h_track.event(cx, self.id, self.child);
-                if let Some(new_offset) = result.new_offset
-                    && self
-                        .apply_scroll_delta(new_offset - self.scroll_offset)
-                        .is_some()
-                {
-                    cx.window_state.request_paint(self.id);
-                }
-                return result.propagation;
+                return self.scroll_by_bar(cx, result);
             }
         }
 
@@ -1030,6 +1178,7 @@ impl View for Scroll {
             let change = self.apply_scroll_delta(delta);
 
             if change.is_some() {
+                self.fade.reveal();
                 cx.window_state.request_paint(self.id);
             }
 
@@ -1052,26 +1201,20 @@ impl View for Scroll {
         // Scroll view creates multiple visual IDs for scrollbars/tracks
         if cx.target_id == self.id.get_element_id() {
             // Main scroll container - children painted automatically by traversal
-        } else if cx.target_id == self.v_handle.element_id {
-            // Painting vertical scrollbar handle
-            if !self.scroll_style.hide_bar() && (self.scroll_style.show_bars_when_idle()) {
-                self.v_handle.paint(cx);
-            }
+            return;
+        }
+        let alpha = self.bar_alpha(cx);
+        if alpha <= 0.0 {
+            return;
+        }
+        if cx.target_id == self.v_handle.element_id {
+            self.v_handle.paint(cx, alpha);
         } else if cx.target_id == self.h_handle.element_id {
-            // Painting horizontal scrollbar handle
-            if !self.scroll_style.hide_bar() && (self.scroll_style.show_bars_when_idle()) {
-                self.h_handle.paint(cx);
-            }
+            self.h_handle.paint(cx, alpha);
         } else if cx.target_id == self.v_track.element_id {
-            // Painting vertical scrollbar track
-            if !self.scroll_style.hide_bar() && (self.scroll_style.show_bars_when_idle()) {
-                self.v_track.paint(cx);
-            }
+            self.v_track.paint(cx, alpha);
         } else if cx.target_id == self.h_track.element_id {
-            // Painting horizontal scrollbar track
-            if !self.scroll_style.hide_bar() && (self.scroll_style.show_bars_when_idle()) {
-                self.h_track.paint(cx);
-            }
+            self.h_track.paint(cx, alpha);
         }
     }
 }
@@ -1211,7 +1354,8 @@ impl ScrollCustomStyle {
         self
     }
 
-    /// Controls whether scroll bars are shown when not scrolling. When false, bars are only shown during scroll interactions.
+    /// Controls whether scroll bars are shown when not scrolling. When false, the bars show
+    /// when the user scrolls and while the pointer is on one, and fade out once scrolling stops.
     pub fn show_bars_when_idle(mut self, show: impl Into<bool>) -> Self {
         self = Self(self.0.set(ShowBarsWhenIdle, show));
         self
@@ -1227,5 +1371,51 @@ pub trait ScrollExt {
 impl<T: IntoView + 'static> ScrollExt for T {
     fn scroll(self) -> Scroll {
         Scroll::new(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn revealed_at(at: Instant) -> IdleFade {
+        IdleFade {
+            last_activity: Some(at),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn idle_bars_show_after_a_scroll_then_fade() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        assert_eq!(IdleFade::default().alpha(t0, false), 0.0);
+        assert_eq!(IdleFade::default().wake(t0, false), Wake::None);
+
+        let fade = revealed_at(t0);
+        assert_eq!(fade.alpha(t0, false), 1.0);
+        assert_eq!(fade.wake(t0, false), Wake::After(IDLE_HOLD));
+        assert_eq!(fade.alpha(ms(500), false), 1.0);
+        assert_eq!(
+            fade.wake(ms(500), false),
+            Wake::After(IDLE_HOLD - Duration::from_millis(500))
+        );
+
+        let halfway = IDLE_HOLD + IDLE_FADE / 2;
+        assert!((fade.alpha(t0 + halfway, false) - 0.5).abs() < 1e-3);
+        assert_eq!(fade.wake(t0 + halfway, false), Wake::NextFrame);
+
+        let gone = IDLE_HOLD + IDLE_FADE;
+        assert_eq!(fade.alpha(t0 + gone, false), 0.0);
+        assert_eq!(fade.wake(t0 + gone, false), Wake::None);
+    }
+
+    #[test]
+    fn held_bars_stay() {
+        let t0 = Instant::now();
+        let late = t0 + IDLE_HOLD + IDLE_FADE * 2;
+        assert_eq!(IdleFade::default().alpha(t0, true), 1.0);
+        assert_eq!(revealed_at(t0).alpha(late, true), 1.0);
+        assert_eq!(revealed_at(t0).wake(late, true), Wake::None);
     }
 }

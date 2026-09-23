@@ -236,7 +236,7 @@ impl Transition {
 
             Stack::vertical_from_iter(rows).style(|s| {
                 s.grid()
-                    .grid_template_columns([auto(), fr(1.)])
+                    .grid_template_columns([auto(), fr(1.0_f32)])
                     .justify_center()
                     .items_center()
                     .row_gap(12)

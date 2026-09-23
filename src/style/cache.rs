@@ -587,7 +587,7 @@ impl Style {
         }
 
         // Check if other has inherited properties we don't have
-        for (key, _) in other.map.iter() {
+        for key in other.map.keys() {
             if let StyleKeyInfo::Prop(prop_info) = key.info
                 && prop_info.inherited
                 && !self.map.contains_key(key)

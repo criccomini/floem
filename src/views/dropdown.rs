@@ -661,7 +661,7 @@ impl<T: Clone + std::cmp::PartialEq + std::fmt::Debug> Dropdown<T> {
                         .inset_left(inset.width)
                         .inset_top(inset.height)
                         .min_width(width.get())
-                        .flex_shrink(0.)
+                        .flex_shrink(0.0_f32)
                 }),
         ));
         self.overlay_id.unwrap().set_style_parent(self.id);

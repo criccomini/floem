@@ -74,7 +74,7 @@ pub fn capture(window_id: WindowId) {
                         _ => panic!(),
                     },
                 )
-                .style(|s| s.flex_basis(0.0).min_height(0.0).flex_grow(1.0));
+                .style(|s| s.flex_basis(0.0).min_height(0.0).flex_grow(1.0_f32));
 
                 let separator = ().style(move |s| {
                     s.width_full()
@@ -268,7 +268,7 @@ fn capture_view(
                 .into_any(),
                 _ => panic!(),
             }
-            .style(|s| s.min_size(0, 0.).flex_grow(1.))
+            .style(|s| s.min_size(0, 0.).flex_grow(1.0_f32))
             .scroll()
             .style(|s| {
                 s.width_full()
@@ -314,7 +314,7 @@ fn capture_view(
         Resizable::new((
             image_view.scroll().style(|s| {
                 s.min_size(0, 0)
-                    .flex_grow(1.)
+                    .flex_grow(1.0_f32)
                     .grid()
                     .items_center()
                     .justify_items(AlignItems::Center)
@@ -328,7 +328,7 @@ fn capture_view(
                 .min_size(0., 0.)
         }),
     ))
-    .style(|s| s.min_size(0., 0.).flex_grow(1.));
+    .style(|s| s.min_size(0., 0.).flex_grow(1.0_f32));
 
     let root = capture.root.clone();
     let tree = view_tree(capture.clone(), capture_view, datas);
@@ -397,7 +397,12 @@ fn capture_view(
         Stack::vertical((header("View Tree"), search, tree)).into_view()
     };
 
-    let tree = tree.style(|s| s.height_full().min_width(0).flex_basis(0).flex_grow(1.0));
+    let tree = tree.style(|s| {
+        s.height_full()
+            .min_width(0)
+            .flex_basis(0)
+            .flex_grow(1.0_f32)
+    });
 
     Resizable::new((left, tree))
         .style(move |s| {
@@ -439,7 +444,7 @@ fn view_tree(
     .class(ListClass)
     .style(|s| {
         s.flex_col()
-            .flex_grow(1.)
+            .flex_grow(1.0_f32)
             .min_size(0., 0.)
             .class(ListItemClass, |s| {
                 s.width_full()

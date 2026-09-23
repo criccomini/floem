@@ -1380,12 +1380,12 @@ impl<W: raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle
         } else {
             let image_data = img.img.image.data.data();
             let mut pixmap = try_ret!(Pixmap::new(img.img.image.width, img.img.image.height));
-            for (a, b) in pixmap
+            for (px, &[r, g, b, a]) in pixmap
                 .pixels_mut()
                 .iter_mut()
-                .zip(image_data.chunks_exact(4))
+                .zip(image_data.as_chunks::<4>().0)
             {
-                *a = tiny_skia::Color::from_rgba8(b[0], b[1], b[2], b[3])
+                *px = tiny_skia::Color::from_rgba8(r, g, b, a)
                     .premultiply()
                     .to_color_u8();
             }
@@ -1885,11 +1885,7 @@ fn layer_composite_rect(layer: &Layer, parent: &Layer) -> Option<IntRect> {
         Size::new(layer.pixmap.width() as f64, layer.pixmap.height() as f64),
     );
 
-    if let Some(draw_bounds) = layer.draw_bounds {
-        rect = rect.intersect(draw_bounds);
-    } else {
-        return None;
-    }
+    rect = rect.intersect(layer.draw_bounds?);
 
     if let Some(layer_clip) = layer.clip {
         rect = rect.intersect(layer_clip);

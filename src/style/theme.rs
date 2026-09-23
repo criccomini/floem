@@ -334,8 +334,8 @@ impl StylePropValue for DesignSystem {
                 .border_radius(6.0)
                 .min_width(280.0)
                 .min_height_pct(0.)
-                .flex_grow(0.)
-                .flex_shrink(1.)
+                .flex_grow(0.0_f32)
+                .flex_shrink(1.0_f32)
         });
 
         Some(content.into_any())
@@ -642,7 +642,7 @@ pub(crate) fn default_theme(os_theme: winit::window::Theme) -> Style {
         .transition(Background, Transition::linear(100.millis()))
         .focus(|s| s.with_theme(|s, t| s.hover(|s| s.background(t.bg_overlay()))))
         .border_radius(100.pct())
-        .flex_shrink(0.)
+        .flex_shrink(0.0_f32)
         .apply(border_style(false))
         .apply(focus_style());
 
@@ -687,7 +687,7 @@ pub(crate) fn default_theme(os_theme: winit::window::Theme) -> Style {
                 })
                 .hover(|s| s.background(t.bg_overlay()))
         })
-        .aspect_ratio(2.)
+        .aspect_ratio(2.0_f32)
         // .focus(|s| s.with_theme(|s, t| s.hover(|s| s.background(t.bg_overlay()))))
         .border_radius(50.pct())
         .set(ToggleButtonCircleRad, 75.pct())

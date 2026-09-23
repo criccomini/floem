@@ -199,7 +199,7 @@ impl ApplicationHandle {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 AppUpdateEvent::MenuAction { action_id } => {
-                    for (_, handle) in self.window_handles.iter_mut() {
+                    for handle in self.window_handles.values_mut() {
                         if handle.window_state.context_menu.contains_key(&action_id)
                             || handle.window_menu_actions.contains_key(&action_id)
                         {
@@ -371,9 +371,7 @@ impl ApplicationHandle {
                 window_handle.ime(ime);
             }
             WindowEvent::MouseWheel { .. } => {}
-            WindowEvent::PinchGesture {
-                delta: _, phase: _, ..
-            } => {}
+            WindowEvent::PinchGesture { .. } => {}
             WindowEvent::TouchpadPressure { .. } => {}
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 window_handle.os_scale(scale_factor);

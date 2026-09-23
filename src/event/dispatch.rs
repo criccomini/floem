@@ -460,7 +460,7 @@ impl<'a> GlobalEventCx<'a> {
                 | Event::Drag(_)
                 | Event::Custom(_)
                 | Event::Extracted => {
-                    panic!("received {:?}, which is not an external event.", &event);
+                    panic!("received {:?}, which is not an external event.", event);
                 }
             }
 

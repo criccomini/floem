@@ -1468,41 +1468,50 @@ fn editor_content(
         // TODO:?
         // editor.kind.track();
 
-        let LineRegion { x, width, rvline } =
-            cursor_caret(&editor, offset, !cursor.is_insert(), cursor.affinity());
+        // The cursor and the document are what bring the caret into view.
+        // Finding where the caret is drawn reads the editor style and the
+        // text layouts, and the style pass writes the style signal on every
+        // restyle, so tracking them here scrolled the caret back into view
+        // whenever the editor was restyled, pulling the view away from where
+        // the user had scrolled it.
+        Effect::untrack(|| {
+            let LineRegion { x, width, rvline } =
+                cursor_caret(&editor, offset, !cursor.is_insert(), cursor.affinity());
 
-        // TODO: don't assume line-height is constant
-        let line_height = f64::from(editor.line_height(0));
+            // TODO: don't assume line-height is constant
+            let line_height = f64::from(editor.line_height(0));
 
-        // TODO: is there a good way to avoid the calculation of the vline here?
-        let vline = editor.vline_of_rvline(rvline);
-        let rect =
-            Rect::from_origin_size((x, vline.get() as f64 * line_height), (width, line_height))
-                .inflate(10.0, 1.0);
+            // TODO: is there a good way to avoid the calculation of the vline here?
+            let vline = editor.vline_of_rvline(rvline);
+            let rect =
+                Rect::from_origin_size((x, vline.get() as f64 * line_height), (width, line_height))
+                    .inflate(10.0, 1.0);
 
-        let viewport = viewport.get_untracked();
-        let smallest_distance = (viewport.y0 - rect.y0)
-            .abs()
-            .min((viewport.y1 - rect.y0).abs())
-            .min((viewport.y0 - rect.y1).abs())
-            .min((viewport.y1 - rect.y1).abs());
-        let biggest_distance = (viewport.y0 - rect.y0)
-            .abs()
-            .max((viewport.y1 - rect.y0).abs())
-            .max((viewport.y0 - rect.y1).abs())
-            .max((viewport.y1 - rect.y1).abs());
-        let jump_to_middle =
-            biggest_distance > viewport.height() && smallest_distance > viewport.height() / 2.0;
+            let viewport = viewport.get_untracked();
+            let smallest_distance = (viewport.y0 - rect.y0)
+                .abs()
+                .min((viewport.y1 - rect.y0).abs())
+                .min((viewport.y0 - rect.y1).abs())
+                .min((viewport.y1 - rect.y1).abs());
+            let biggest_distance = (viewport.y0 - rect.y0)
+                .abs()
+                .max((viewport.y1 - rect.y0).abs())
+                .max((viewport.y0 - rect.y1).abs())
+                .max((viewport.y1 - rect.y1).abs());
+            let jump_to_middle =
+                biggest_distance > viewport.height() && smallest_distance > viewport.height() / 2.0;
 
-        if jump_to_middle {
-            rect.inflate(0.0, viewport.height() / 2.0)
-        } else {
-            let mut rect = rect;
-            let cursor_surrounding_lines = editor.es.with(|s| s.cursor_surrounding_lines()) as f64;
-            rect.y0 -= cursor_surrounding_lines * line_height;
-            rect.y1 += cursor_surrounding_lines * line_height;
-            rect
-        }
+            if jump_to_middle {
+                rect.inflate(0.0, viewport.height() / 2.0)
+            } else {
+                let mut rect = rect;
+                let cursor_surrounding_lines =
+                    editor.es.with(|s| s.cursor_surrounding_lines()) as f64;
+                rect.y0 -= cursor_surrounding_lines * line_height;
+                rect.y1 += cursor_surrounding_lines * line_height;
+                rect
+            }
+        })
     })
     .style(|s| s.size_pct(100.0, 100.0))
 }

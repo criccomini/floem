@@ -1,3 +1,5 @@
+mod embolden;
+
 use std::cell::RefCell;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem;
@@ -17,8 +19,7 @@ use peniko::{
     kurbo::{Affine, Point, Rect, Shape},
 };
 use swash::FontRef;
-use swash::scale::{Render, ScaleContext, Source, StrikeWith};
-use swash::zeno::Format;
+use swash::scale::ScaleContext;
 use wgpu::{
     Adapter, Device, DeviceType, Queue, StoreOp, Surface, SurfaceConfiguration, TextureFormat,
 };
@@ -906,22 +907,19 @@ impl GlyphRaster<'_> {
                 .hint(self.hint)
                 .normalized_coords(self.coords)
                 .build();
-            let mut render = Render::new(&[
-                Source::ColorOutline(0),
-                Source::ColorBitmap(StrikeWith::BestFit),
-                Source::Outline,
-            ]);
-            render
-                .format(Format::Alpha)
-                .offset(swash::zeno::Vector::new(f32::from(x_bin) / 4.0, 0.0))
-                .embolden(self.embolden);
-            if let Some(angle) = self.skew {
-                render.transform(Some(swash::zeno::Transform::skew(
+            let transform = self.skew.map(|angle| {
+                swash::zeno::Transform::skew(
                     swash::zeno::Angle::from_degrees(angle),
                     swash::zeno::Angle::ZERO,
-                )));
-            }
-            render.render(&mut scaler, glyph_id)
+                )
+            });
+            embolden::render_glyph(
+                &mut scaler,
+                glyph_id,
+                swash::zeno::Vector::new(f32::from(x_bin) / 4.0, 0.0),
+                self.embolden,
+                transform,
+            )
         });
         match image {
             Some(img) => GlyphImage {

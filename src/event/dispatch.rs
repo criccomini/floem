@@ -1081,7 +1081,8 @@ impl RouteCx<'_, '_> {
     ///
     /// Hover transitions go first, in the order they were generated: the views the
     /// pointer left, innermost first, then the views it entered, outermost first.
-    /// The other queues go newest first (a DoubleClick before its Click).
+    /// Queued clicks go newest first (a DoubleClick before its Click), then focus
+    /// changes in order.
     fn flush_pending_events(&mut self) {
         let pending = std::mem::take(&mut self.pending_hover_events);
         for (kind, event) in pending {
@@ -1091,9 +1092,11 @@ impl RouteCx<'_, '_> {
         for (kind, event) in pending.into_iter().rev() {
             self.route_synthetic(kind, event);
         }
+        // Focus changes, in the order they were made: the view that lost focus hears
+        // so before the one that gained it.
         let pending = std::mem::take(&mut self.pending_default_events);
         if !self.prevent_default {
-            for (kind, event) in pending.into_iter().rev() {
+            for (kind, event) in pending {
                 self.route_synthetic(kind, event);
             }
         }

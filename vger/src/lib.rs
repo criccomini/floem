@@ -1,3 +1,5 @@
+mod embolden;
+
 use std::cell::RefCell;
 use std::mem;
 use std::sync::Arc;
@@ -15,8 +17,7 @@ use peniko::{
     kurbo::{Affine, Point, Rect, Shape},
 };
 use swash::FontRef;
-use swash::scale::{Render, ScaleContext, Source, StrikeWith};
-use swash::zeno::Format;
+use swash::scale::ScaleContext;
 use wgpu::{
     Adapter, Device, DeviceType, Queue, StoreOp, Surface, SurfaceConfiguration, TextureFormat,
 };
@@ -561,22 +562,19 @@ impl Renderer for VgerRenderer {
                             .hint(props.hint)
                             .normalized_coords(coords)
                             .build();
-                        let mut render = Render::new(&[
-                            Source::ColorOutline(0),
-                            Source::ColorBitmap(StrikeWith::BestFit),
-                            Source::Outline,
-                        ]);
-                        render
-                            .format(Format::Alpha)
-                            .offset(swash::zeno::Vector::new(glyph_x.fract(), glyph_y.fract()))
-                            .embolden(embolden);
-                        if let Some(angle) = skew {
-                            render.transform(Some(swash::zeno::Transform::skew(
+                        let transform = skew.map(|angle| {
+                            swash::zeno::Transform::skew(
                                 swash::zeno::Angle::from_degrees(angle),
                                 swash::zeno::Angle::ZERO,
-                            )));
-                        }
-                        render.render(&mut scaler, glyph_id)
+                            )
+                        });
+                        embolden::render_glyph(
+                            &mut scaler,
+                            glyph_id,
+                            swash::zeno::Vector::new(glyph_x.fract(), glyph_y.fract()),
+                            embolden,
+                            transform,
+                        )
                     });
                     match image {
                         Some(img) => GlyphImage {

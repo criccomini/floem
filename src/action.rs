@@ -161,15 +161,22 @@ impl TimerToken {
     }
 }
 
+/// Runs a timer's `action` with the root of `view`, the view current when
+/// the timer was set, as the current view. The view may have been removed
+/// since, and then the action runs under whatever view is current.
+fn run_timer_action(view: ViewId, token: TimerToken, action: impl FnOnce(TimerToken)) {
+    let current_view = get_current_view();
+    if let Some(root) = view.try_root() {
+        set_current_view(root);
+    }
+    action(token);
+    set_current_view(current_view);
+}
+
 /// Execute a callback after a specified duration.
 pub fn exec_after(duration: Duration, action: impl FnOnce(TimerToken) + 'static) -> TimerToken {
     let view = get_current_view();
-    let action = move |token| {
-        let current_view = get_current_view();
-        set_current_view(view.root());
-        action(token);
-        set_current_view(current_view);
-    };
+    let action = move |token| run_timer_action(view, token, action);
 
     let token = TimerToken::next();
     let deadline = Instant::now() + duration;
@@ -195,12 +202,7 @@ pub fn exec_after_animation_frame(action: impl FnOnce(TimerToken) + 'static) -> 
         return TimerToken::INVALID;
     };
 
-    let action = move |token| {
-        let current_view = get_current_view();
-        set_current_view(view.root());
-        action(token);
-        set_current_view(current_view);
-    };
+    let action = move |token| run_timer_action(view, token, action);
 
     let token = TimerToken::next();
     add_app_update_event(AppUpdateEvent::RequestAnimationTimer {
@@ -313,4 +315,45 @@ pub fn add_overlay<V: View + 'static>(view: V) -> ViewId {
 /// Removes an overlay from the current window.
 pub fn remove_overlay(id: ViewId) {
     add_update_message(UpdateMessage::RemoveOverlay { id });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use super::*;
+    use crate::app::APP_UPDATE_EVENTS;
+
+    /// Takes the timer that `exec_after` queued for the app.
+    fn take_timer() -> Timer {
+        APP_UPDATE_EVENTS.with_borrow_mut(|events| {
+            let at = events
+                .iter()
+                .position(|e| matches!(e, AppUpdateEvent::RequestTimer { .. }))
+                .expect("a timer was requested");
+            match events.remove(at) {
+                AppUpdateEvent::RequestTimer { timer } => timer,
+                _ => unreachable!(),
+            }
+        })
+    }
+
+    #[test]
+    fn a_timer_fires_after_the_view_that_set_it_is_removed() {
+        let root = ViewId::new_root();
+        set_current_view(root);
+        let view = ViewId::new();
+        set_current_view(view);
+        let fired = Rc::new(Cell::new(None));
+        let seen = fired.clone();
+        exec_after(Duration::ZERO, move |_| seen.set(Some(get_current_view())));
+        set_current_view(root);
+        view.remove();
+
+        let timer = take_timer();
+        (timer.action)(timer.token);
+
+        assert_eq!(fired.get(), Some(root));
+        assert_eq!(get_current_view(), root);
+    }
 }

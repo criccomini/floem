@@ -876,7 +876,7 @@ impl ViewId {
 
     /// Get the window id of the window containing this view, if there is one.
     pub fn window_id(&self) -> Option<WindowId> {
-        window_id_for_root(self.root())
+        self.try_root().and_then(window_id_for_root)
     }
 
     /// Request that this view have it's paint pass run

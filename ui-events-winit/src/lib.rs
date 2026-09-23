@@ -40,8 +40,8 @@ use ui_events::{
     ScrollDelta,
     keyboard::KeyboardEvent,
     pointer::{
-        PointerButtonEvent, PointerEvent, PointerGesture, PointerGestureEvent, PointerId,
-        PointerInfo, PointerScrollEvent, PointerState, PointerType, PointerUpdate,
+        PointerButton, PointerButtonEvent, PointerEvent, PointerGesture, PointerGestureEvent,
+        PointerId, PointerInfo, PointerScrollEvent, PointerState, PointerType, PointerUpdate,
     },
 };
 use winit::{
@@ -76,6 +76,9 @@ pub struct WindowEventReducer {
     counter: TapCounter,
     /// First time an event was received..
     first_instant: Option<Instant>,
+    /// Whether the primary button went down with Control held on macOS and
+    /// is reported as the secondary button until it is released.
+    control_click: bool,
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -217,7 +220,16 @@ impl WindowEventReducer {
                 button: ButtonSource::Mouse(button),
                 ..
             } => {
-                let button = pointer::try_from_winit_button(*button);
+                let mut button = pointer::try_from_winit_button(*button);
+                // On macOS, Control with the primary button is a secondary
+                // click, as AppKit and every native app treat it, but winit
+                // reports the button that was pressed.
+                if button == Some(PointerButton::Primary) {
+                    self.control_click = cfg!(target_os = "macos") && self.modifiers.control_key();
+                    if self.control_click {
+                        button = Some(PointerButton::Secondary);
+                    }
+                }
                 if let Some(button) = button {
                     self.primary_state.buttons.insert(button);
                 }
@@ -236,7 +248,13 @@ impl WindowEventReducer {
                 button: ButtonSource::Mouse(button),
                 ..
             } => {
-                let button = pointer::try_from_winit_button(*button);
+                let mut button = pointer::try_from_winit_button(*button);
+                // The release ends a Control click as the press began it,
+                // whether or not Control is still held.
+                if self.control_click && button == Some(PointerButton::Primary) {
+                    button = Some(PointerButton::Secondary);
+                    self.control_click = false;
+                }
                 if let Some(button) = button {
                     self.primary_state.buttons.remove(button);
                 }
@@ -452,8 +470,64 @@ impl TapCounter {
 
 #[cfg(test)]
 mod tests {
-    // CI will fail unless cargo nextest can execute at least one test per workspace.
-    // Delete this dummy test once we have an actual real test.
+    use super::*;
+    use winit::event::{ButtonSource, Modifiers, MouseButton};
+
+    fn modifiers(reducer: &mut WindowEventReducer, state: ModifiersState) {
+        reducer.reduce(1.0, &WindowEvent::ModifiersChanged(Modifiers::from(state)));
+    }
+
+    /// The button of the pointer event the reducer makes of a left press or
+    /// release.
+    fn left(reducer: &mut WindowEventReducer, state: ElementState) -> Option<PointerButton> {
+        let event = WindowEvent::PointerButton {
+            device_id: None,
+            state,
+            position: (10.0, 10.0).into(),
+            primary: true,
+            button: ButtonSource::Mouse(MouseButton::Left),
+        };
+        match reducer.reduce(1.0, &event) {
+            Some(WindowEventTranslation::Pointer(PointerEvent::Down(e) | PointerEvent::Up(e))) => {
+                e.button
+            }
+            other => panic!("expected a press or a release, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn dummy_test_until_we_have_a_real_test() {}
+    fn a_left_click_is_primary() {
+        let mut reducer = WindowEventReducer::default();
+        assert_eq!(
+            left(&mut reducer, ElementState::Pressed),
+            Some(PointerButton::Primary)
+        );
+        assert_eq!(
+            left(&mut reducer, ElementState::Released),
+            Some(PointerButton::Primary)
+        );
+    }
+
+    #[test]
+    fn a_control_click_is_secondary_on_macos_alone() {
+        let expected = if cfg!(target_os = "macos") {
+            PointerButton::Secondary
+        } else {
+            PointerButton::Primary
+        };
+        let mut reducer = WindowEventReducer::default();
+        modifiers(&mut reducer, ModifiersState::CONTROL);
+        assert_eq!(left(&mut reducer, ElementState::Pressed), Some(expected));
+        // Control let go before the button: the release still ends the
+        // secondary click.
+        modifiers(&mut reducer, ModifiersState::empty());
+        assert_eq!(left(&mut reducer, ElementState::Released), Some(expected));
+        assert!(reducer.primary_state.buttons.is_empty());
+
+        // The next click, without Control, is a primary one again.
+        assert_eq!(
+            left(&mut reducer, ElementState::Pressed),
+            Some(PointerButton::Primary)
+        );
+    }
 }

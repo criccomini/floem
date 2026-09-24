@@ -108,7 +108,7 @@ fn profile_view(profile: &Rc<Profile>) -> impl IntoView {
         .map(|(i, frame)| {
             let frame = frame.clone();
             Stack::horizontal((
-                Label::new(format!("Frame #{i}")).style(|s| s.flex_grow(1.0)),
+                Label::new(format!("Frame #{i}")).style(|s| s.flex_grow(1.0_f32)),
                 Label::new(format!("{:.4} ms", frame.sum.as_secs_f64() * 1000.0))
                     .style(|s| s.margin_right(16)),
             ))
@@ -154,7 +154,7 @@ fn profile_view(profile: &Rc<Profile>) -> impl IntoView {
         .style(|s| {
             s.flex_basis(0)
                 .min_height(0)
-                .flex_grow(1.0)
+                .flex_grow(1.0_f32)
                 .with_theme(|s, t| s.background(t.bg_base()))
         }),
         header("Event").style(|s| {
@@ -163,7 +163,7 @@ fn profile_view(profile: &Rc<Profile>) -> impl IntoView {
         }),
         event_tooltip,
     ))
-    .style(|s| s.min_width(230.0).flex_grow(1.));
+    .style(|s| s.min_width(230.0).flex_grow(1.0_f32));
 
     let timeline = dyn_container(
         move || selected_frame.get(),
@@ -213,7 +213,12 @@ fn profile_view(profile: &Rc<Profile>) -> impl IntoView {
                         .style(move |s| s.min_width_pct(zoom.get() * 100.0).height_full()),
                 )
                 .custom_style(|s| s.vertical_track_inset(5.).show_bars_when_idle(false))
-                .style(|s| s.height_full().min_width(0).flex_basis(0).flex_grow(1.0))
+                .style(|s| {
+                    s.height_full()
+                        .min_width(0)
+                        .flex_basis(0)
+                        .flex_grow(1.0_f32)
+                })
                 .on_event(listener::PointerWheel, move |_cx, se| {
                     let delta = se.resolve_to_points(None, None);
                     zoom.set(zoom.get() * (1.0 - delta.y / 400.0));
@@ -231,12 +236,12 @@ fn profile_view(profile: &Rc<Profile>) -> impl IntoView {
         s.width_full()
             .min_height(0)
             .flex_basis(0)
-            .flex_grow(1.0)
+            .flex_grow(1.0_f32)
             .with_theme(|s, t| s.background(t.bg_base()))
     });
 
     let timeline = Stack::vertical((header("Timeline"), timeline))
-        .style(|s| s.min_width(0).flex_basis(0).flex_grow(1.0));
+        .style(|s| s.min_width(0).flex_basis(0).flex_grow(1.0_f32));
 
     Resizable::new((frames, timeline)).style(|s| s.height_full().width_full().max_width_full())
 }
@@ -293,7 +298,12 @@ pub fn profiler(window_id: WindowId) -> impl IntoView {
             }
         },
     )
-    .style(|s| s.width_full().min_height(0).flex_basis(0).flex_grow(1.0));
+    .style(|s| {
+        s.width_full()
+            .min_height(0)
+            .flex_basis(0)
+            .flex_grow(1.0_f32)
+    });
 
     // FIXME: This needs an extra `container` or the `Stack::vertical` ends up horizontal.
     Container::new(Stack::vertical((button, separator, lower)).style(|s| s.size_full()))

@@ -1115,7 +1115,7 @@ impl ScrollCustomStyle {
             self.0
                 .min_size(0., 0.)
                 .size_full()
-                .flex_grow(1.)
+                .flex_grow(1.0_f32)
                 .flex_basis(0.),
         );
         self

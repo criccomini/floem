@@ -134,7 +134,7 @@ impl View for ResizeChild {
         Some(
             Style::new()
                 .apply_opt(self.set_basis_percent, |s, percent| s.flex_basis(percent))
-                .apply_if(self.is_last, |s| s.flex_grow(1.))
+                .apply_if(self.is_last, |s| s.flex_grow(1.0_f32))
                 .min_size(0., 0.)
                 .overflow_x(Overflow::Clip)
                 .overflow_y(Overflow::Clip),

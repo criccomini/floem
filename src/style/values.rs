@@ -652,7 +652,7 @@ where
 
                 let item_view = item.debug_view().unwrap_or_else(|| {
                     Label::new(format!("{:?}", item))
-                        .style(|s| s.flex_grow(1.0))
+                        .style(|s| s.flex_grow(1.0_f32))
                         .into_any()
                 });
 
@@ -815,7 +815,7 @@ impl<T: StylePropValue + 'static> StylePropValue for Vec<T> {
 
                 let item_view = item.debug_view().unwrap_or_else(|| {
                     Label::new(format!("{:?}", item))
-                        .style(|s| s.flex_grow(1.0))
+                        .style(|s| s.flex_grow(1.0_f32))
                         .into_any()
                 });
 
@@ -1090,7 +1090,7 @@ impl StylePropValue for Color {
                 .flatten()
                 .style(|s| {
                     s.grid()
-                        .grid_template_columns([auto(), fr(1.)])
+                        .grid_template_columns([auto(), fr(1.0_f32)])
                         .justify_center()
                         .items_center()
                         .row_gap(20)
@@ -1309,7 +1309,7 @@ impl StylePropValue for Stroke {
 
             Stack::vertical_from_iter(rows).style(|s| {
                 s.grid()
-                    .grid_template_columns([auto(), fr(1.)])
+                    .grid_template_columns([auto(), fr(1.0_f32)])
                     .justify_center()
                     .items_center()
                     .row_gap(12)
@@ -1642,7 +1642,7 @@ impl StylePropValue for Affine {
 
             let components_grid = (translate_row, rotate_row, scale_row).flatten().style(|s| {
                 s.grid()
-                    .grid_template_columns([auto(), fr(1.)])
+                    .grid_template_columns([auto(), fr(1.0_f32)])
                     .justify_center()
                     .items_center()
                     .row_gap(8)

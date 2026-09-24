@@ -291,12 +291,12 @@ fn box_model_layer(
         ))
         .style(|s| {
             s.grid()
-                .grid_template_columns([fr(1.), auto(), fr(1.)])
+                .grid_template_columns([fr(1.0_f32), auto(), fr(1.0_f32)])
                 .width_full()
         }),
         Stack::new((left, child, right)).style(move |s| {
             s.grid()
-                .grid_template_columns([fr(1.), auto(), fr(1.)])
+                .grid_template_columns([fr(1.0_f32), auto(), fr(1.0_f32)])
                 .items_center()
                 .col_gap(side_gap)
         }),
@@ -828,13 +828,13 @@ fn selected_view(
 
             let style_list = style
                 .debug_view(Some(&view.direct_style))
-                .style(|s| s.height_full().flex_grow(1.))
+                .style(|s| s.height_full().flex_grow(1.0_f32))
                 .scroll()
                 .style(|s| {
                     s.set(OverflowX, taffy::Overflow::Scroll)
                         .set(OverflowY, taffy::Overflow::Visible)
                         .height_full()
-                        .flex_grow(1.)
+                        .flex_grow(1.0_f32)
                 });
 
             let selected_view_info = Stack::vertical_from_iter(
@@ -852,7 +852,7 @@ fn selected_view(
                         })
                     }),
             )
-            .style(|s| s.flex_grow(1.).height_full().gap(2.0));
+            .style(|s| s.flex_grow(1.0_f32).height_full().gap(2.0));
 
             let selected_view_summary = Stack::horizontal((
                 selected_view_info,
@@ -861,7 +861,7 @@ fn selected_view(
             .style(|s| {
                 s.items_start()
                     .gap(16.0)
-                    .flex_grow(1.)
+                    .flex_grow(1.0_f32)
                     .justify_between()
                     .padding_right(15)
             })
@@ -874,12 +874,12 @@ fn selected_view(
 
             let selected_view_panel =
                 Stack::vertical((header("Selected View"), selected_view_summary))
-                    .style(|s| s.width_full().min_size(0., 0.).flex_grow(1.));
+                    .style(|s| s.width_full().min_size(0., 0.).flex_grow(1.0_f32));
             let style_panel = Stack::vertical((header("View Style"), style_list))
-                .style(|s| s.width_full().min_size(0., 0.).flex_grow(1.));
+                .style(|s| s.width_full().min_size(0., 0.).flex_grow(1.0_f32));
 
             Stack::vertical((selected_view_panel, style_panel))
-                .style(|s| s.width_full().flex_shrink(0.).gap(10).min_size(0., 0.))
+                .style(|s| s.width_full().flex_shrink(0.0_f32).gap(10).min_size(0., 0.))
                 .into_any()
         } else {
             Label::new("No selection")

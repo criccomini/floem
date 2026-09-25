@@ -257,6 +257,12 @@ impl HeadlessHarness {
         self.dispatch_event(create_pointer_up_with_count(x, y, 2))
     }
 
+    /// Simulate a secondary (right) press at the given position, with no
+    /// release: a context menu takes the release for itself.
+    pub fn secondary_pointer_down(&mut self, x: f64, y: f64) -> EventResult {
+        self.dispatch_event(create_secondary_pointer_down(x, y))
+    }
+
     /// Simulate a secondary (right) click at the given position.
     pub fn secondary_click(&mut self, x: f64, y: f64) -> EventResult {
         self.dispatch_event(create_secondary_pointer_down(x, y));

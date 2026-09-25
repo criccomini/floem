@@ -1400,10 +1400,21 @@ fn editor_content(
                     }
                     id.request_focus();
                     id.request_paint();
-                    if pointer.is_primary_pointer() {
-                        editor.get_untracked().pointer_down_primary(state);
-                    } else if button.is_some_and(|b| b == PointerButton::Secondary) {
-                        editor.get_untracked().right_click(state);
+                    // `is_primary_pointer` names the device, not the button:
+                    // every mouse button is the primary pointer. A right
+                    // press taken for a left one starts a drag selection, and
+                    // the context menu it opens swallows the release, so the
+                    // selection then follows the pointer. A touch has no
+                    // button, and its first finger presses as the left button.
+                    match button {
+                        Some(PointerButton::Primary) => {
+                            editor.get_untracked().pointer_down_primary(state)
+                        }
+                        Some(PointerButton::Secondary) => editor.get_untracked().right_click(state),
+                        None if pointer.is_primary_pointer() => {
+                            editor.get_untracked().pointer_down_primary(state)
+                        }
+                        _ => {}
                     }
                 },
             )

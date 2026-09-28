@@ -44,7 +44,18 @@ pub struct TextLayoutState {
     text_overflow: TextOverflow,
     last_overflow_state: Option<bool>,
     view_id: Option<ViewId>,
+    /// Sizes already measured from the base layout, by width constraint
+    /// and overflow. Taffy measures a leaf several times in a pass, and
+    /// an ellipsis measure shapes the cut text from scratch.
+    measured: Vec<(Option<u32>, TextOverflow, peniko::kurbo::Size)>,
+    /// The width of the ellipsis in the base layout's attributes.
+    ellipsis_width: Option<f32>,
 }
+
+/// How many measured sizes a text keeps. Taffy asks a leaf for its
+/// min-content, max-content and definite sizes, and a width or two more
+/// as its container settles.
+const MEASURED_CAPACITY: usize = 8;
 
 impl TextLayoutState {
     /// Creates empty shared text-layout state.
@@ -59,6 +70,8 @@ impl TextLayoutState {
             text_overflow: TextOverflow::NoWrap(NoWrapOverflow::Clip),
             last_overflow_state: None,
             view_id,
+            measured: Vec::new(),
+            ellipsis_width: None,
         }
     }
 
@@ -71,6 +84,7 @@ impl TextLayoutState {
         self.apply_text_overflow(&mut text_layout);
         text_layout.set_text(text, attrs_list, text_align);
         self.text_layout = Some(text_layout);
+        self.clear_measured();
         self.clear_overflow_state();
     }
 
@@ -84,6 +98,7 @@ impl TextLayoutState {
                 text_layout.set_text(&current_text, self.attrs_list.clone(), self.text_align);
                 self.text_layout = Some(text_layout);
             }
+            self.clear_measured();
             self.clear_overflow_state();
         }
     }
@@ -131,8 +146,17 @@ impl TextLayoutState {
         }
     }
 
-    fn ellipsis_layout(&self) -> TextLayout {
-        self.build_layout("...")
+    /// The ellipsis's width, from `ellipsis_width` once it is known. The
+    /// caller keeps it there.
+    fn dots_width(&self) -> f32 {
+        self.ellipsis_width
+            .unwrap_or_else(|| self.build_layout("...").size().width as f32)
+    }
+
+    /// Forgets what was measured from the base layout, which has changed.
+    fn clear_measured(&mut self) {
+        self.measured.clear();
+        self.ellipsis_width = None;
     }
 
     fn ellipsis_text(base_text: &str, byte_end: usize) -> String {
@@ -224,6 +248,37 @@ impl TextLayoutState {
         width_constraint: Option<f32>,
         text_overflow: TextOverflow,
     ) -> peniko::kurbo::Size {
+        let key = width_constraint.map(f32::to_bits);
+        if let Some((_, _, size)) = self
+            .measured
+            .iter()
+            .find(|(width, overflow, _)| *width == key && *overflow == text_overflow)
+        {
+            return *size;
+        }
+        let size = self.measure_overflow_size(width_constraint, text_overflow);
+        if self.measured.len() == MEASURED_CAPACITY {
+            self.measured.remove(0);
+        }
+        self.measured.push((key, text_overflow, size));
+        size
+    }
+
+    fn measure_overflow_size(
+        &mut self,
+        width_constraint: Option<f32>,
+        text_overflow: TextOverflow,
+    ) -> peniko::kurbo::Size {
+        let dots_width = match text_overflow {
+            TextOverflow::NoWrap(NoWrapOverflow::Ellipsis)
+                if width_constraint.is_some() && self.text_layout.is_some() =>
+            {
+                let width = self.dots_width();
+                self.ellipsis_width = Some(width);
+                width
+            }
+            _ => 0.0,
+        };
         let Some(text_layout) = self.text_layout.as_ref() else {
             return peniko::kurbo::Size::new(0.0, 14.0);
         };
@@ -234,7 +289,6 @@ impl TextLayoutState {
 
         match text_overflow {
             TextOverflow::NoWrap(NoWrapOverflow::Ellipsis) => {
-                let dots_width = self.ellipsis_layout().size().width as f32;
                 let width_left = available_width - dots_width;
                 let byte_end = text_layout
                     .hit_test(Point::new(width_left as f64, 0.0))
@@ -292,7 +346,8 @@ impl TextLayoutState {
 
             match self.text_overflow {
                 TextOverflow::NoWrap(NoWrapOverflow::Ellipsis) => {
-                    let dots_width = self.ellipsis_layout().size().width as f32;
+                    let dots_width = self.dots_width();
+                    self.ellipsis_width = Some(dots_width);
                     let width_left = final_width - dots_width;
                     let byte_end = text_layout
                         .hit_test(Point::new(width_left as f64, 0.0))
@@ -418,6 +473,31 @@ mod tests {
     };
     use std::{cell::RefCell, rc::Rc};
     use taffy::{AvailableSpace, Size, Style, TaffyTree};
+
+    /// A measure is kept until the text changes, and new text is measured
+    /// again at the same width.
+    #[test]
+    fn a_kept_measure_goes_with_its_text() {
+        let ellipsis = TextOverflow::NoWrap(NoWrapOverflow::Ellipsis);
+        let state = |text: &str| {
+            let mut state = TextLayoutState::new(None);
+            state.set_text(text, AttrsList::new(Attrs::new()), None);
+            state.set_text_overflow(ellipsis);
+            state
+        };
+
+        let mut kept = state("a much longer piece of text");
+        let cut = kept.compute_overflow_size(Some(60.0), ellipsis);
+        assert_eq!(kept.compute_overflow_size(Some(60.0), ellipsis), cut);
+
+        kept.set_text("ab", AttrsList::new(Attrs::new()), None);
+        let short = kept.compute_overflow_size(Some(60.0), ellipsis);
+        assert!(short.width < cut.width, "{short:?} is not under {cut:?}");
+        assert_eq!(
+            state("ab").compute_overflow_size(Some(60.0), ellipsis),
+            short
+        );
+    }
 
     #[test]
     fn taffy_layout_updates_after_text_change_for_measured_text_child() {

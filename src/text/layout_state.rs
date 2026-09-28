@@ -402,6 +402,46 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
     use taffy::{AvailableSpace, Size, Style, TaffyTree};
 
+    /// A capital centred in a box has its ink's middle at the box's
+    /// middle. Centring on the ascent put it low by half the room the font
+    /// keeps above its capitals: about 0.13em in San Francisco.
+    #[test]
+    fn centred_text_puts_a_capitals_middle_at_the_boxs_middle() {
+        use parley::layout::PositionedLayoutItem;
+        use parley::swash::{FontRef, scale::ScaleContext};
+        use peniko::kurbo::Rect;
+
+        let mut state = TextLayoutState::new(None);
+        state.set_text("H", AttrsList::new(Attrs::new().font_size(100.0)), None);
+        let origin = state.centered_text_origin(Rect::new(0.0, 0.0, 200.0, 200.0));
+
+        let layout = state.get_text_layout().expect("a layout");
+        let mut ink = None;
+        for line in layout.parley_layout().lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(run) = item else {
+                    continue;
+                };
+                let font = run.run().font();
+                let font = FontRef::from_index(font.data.data(), font.index as usize).unwrap();
+                let mut context = ScaleContext::new();
+                let mut scaler = context.builder(font).size(run.run().font_size()).build();
+                for glyph in run.positioned_glyphs() {
+                    let bounds = scaler.scale_outline(glyph.id as u16).unwrap().bounds();
+                    // swash's y points up from the baseline.
+                    ink = Some((glyph.y - bounds.max.y, glyph.y - bounds.min.y));
+                }
+            }
+        }
+        let (top, bottom) = ink.expect("the H's outline");
+        let middle = origin.y + f64::from(top + bottom) / 2.0;
+        assert!(
+            (middle - 100.0).abs() < 0.5,
+            "the H's ink runs {top}..{bottom} from y {}, its middle at {middle}",
+            origin.y
+        );
+    }
+
     #[test]
     fn taffy_layout_updates_after_text_change_for_measured_text_child() {
         let layout_data = Rc::new(RefCell::new(TextLayoutState::new(None)));

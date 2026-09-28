@@ -760,7 +760,10 @@ impl TextLayout {
         (min_y.is_finite() && max_y.is_finite()).then_some((min_y, max_y))
     }
 
-    /// Returns the vertical bounds used when visually centering this layout.
+    /// Returns the vertical bounds used when visually centering this layout:
+    /// from the top of the capitals to the baseline, so neither descenders
+    /// nor the room a font's ascent keeps above its capitals move the text.
+    /// A line whose fonts give no cap height falls back to its ascent.
     pub fn centering_bounds_y(&self) -> Option<(f32, f32)> {
         if self.layout.is_empty() {
             return None;
@@ -771,7 +774,8 @@ impl TextLayout {
         for i in 0..self.layout.len() {
             if let Some(line) = self.layout.get(i) {
                 let m = line.metrics();
-                min_y = min_y.min(m.baseline - m.ascent);
+                let cap = line_cap_height(&line).unwrap_or(m.ascent);
+                min_y = min_y.min(m.baseline - cap);
                 max_y = max_y.max(m.baseline);
             }
         }
@@ -806,4 +810,20 @@ impl TextLayout {
             }
         }
     }
+}
+
+/// The tallest cap height among a line's runs, from each run's font at its
+/// size and variation, or `None` when no run's font reports one.
+fn line_cap_height(line: &parley::layout::Line<'_, TextBrush>) -> Option<f32> {
+    line.runs()
+        .filter_map(|run| {
+            let font = run.font();
+            let font = FontRef::from_index(font.data.data(), font.index as usize)?;
+            let cap = font
+                .metrics(run.normalized_coords())
+                .scale(run.font_size())
+                .cap_height;
+            (cap > 0.0).then_some(cap)
+        })
+        .reduce(f32::max)
 }

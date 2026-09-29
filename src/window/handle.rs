@@ -1195,10 +1195,10 @@ impl WindowHandle {
                         let _ = self.window.drag_resize_window(direction);
                     }
                     UpdateMessage::ToggleWindowMaximized => {
-                        self.window.set_maximized(!self.window.is_maximized());
+                        self.set_maximized_later(None);
                     }
                     UpdateMessage::SetWindowMaximized(maximized) => {
-                        self.window.set_maximized(maximized);
+                        self.set_maximized_later(Some(maximized));
                     }
                     UpdateMessage::MinimizeWindow => {
                         self.window.set_minimized(true);
@@ -1476,6 +1476,28 @@ impl WindowHandle {
         self.event(Event::Window(WindowEvent::Closed));
         self.scope.dispose();
         remove_window_id_mapping(&self.id, &self.window_id);
+    }
+
+    /// Sets the window's maximized state, or toggles it when `maximized` is
+    /// `None`.
+    ///
+    /// On macOS, winit zooms a resizable window with `-[NSWindow zoom:]`,
+    /// which animates the frame and does not return until the animation ends.
+    /// Called from here, inside winit's event handler, every resize and
+    /// redraw of the animation waits for the handler to return, so the last
+    /// frame is stretched across the animation and the layout jumps at the
+    /// end. Zooming from the main queue, once the handler has returned, lets
+    /// each step of the animation resize and repaint the window.
+    fn set_maximized_later(&self, maximized: Option<bool>) {
+        let window = self.window.clone();
+        let set = move || {
+            let maximized = maximized.unwrap_or_else(|| !window.is_maximized());
+            window.set_maximized(maximized);
+        };
+        #[cfg(target_os = "macos")]
+        dispatch2::DispatchQueue::main().exec_async(set);
+        #[cfg(not(target_os = "macos"))]
+        set();
     }
 
     #[cfg(target_os = "macos")]

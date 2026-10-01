@@ -547,6 +547,7 @@ impl Renderer for VgerRenderer {
             .glyph_transform
             .map(|transform| transform.as_coeffs()[0].atan().to_degrees() as f32);
         let embolden = scaled_embolden_strength(self.font_embolden, scale);
+        let bitmaps = font_ref.color_strikes().next().is_some();
         let raster = GlyphRaster {
             font: font_ref,
             size: props.font_size * scale as f32,
@@ -567,7 +568,11 @@ impl Renderer for VgerRenderer {
             }
 
             let scaled_font_size = (props.font_size * scale as f32).round() as u32;
-            let (x, y, x_bin) = glyph_raster_position(glyph_x, glyph_y);
+            let (x, y, x_bin) = if bitmaps {
+                bitmap_raster_position(glyph_x, glyph_y)
+            } else {
+                glyph_raster_position(glyph_x, glyph_y)
+            };
             let glyph_id = glyph.id as u16;
 
             let synthesis_bits = skew.unwrap_or(0.0).to_bits() & 0xFFFF_FFFE;
@@ -881,6 +886,16 @@ fn glyph_raster_position(x: f32, y: f32) -> (f32, f32, u8) {
     (whole, y.round(), bin)
 }
 
+/// Where a glyph from a font of color bitmaps, an emoji, whose origin is
+/// at `(x, y)` is drawn from: the nearest whole device pixel each way, in
+/// the first bin. swash draws a bitmap where it is asked to, whatever
+/// quarter of a pixel it is asked for, so the pixel `glyph_raster_position`
+/// leaves it at, the one left of its quarter, put it up to three quarters
+/// of a pixel left of where it was laid out.
+fn bitmap_raster_position(x: f32, y: f32) -> (f32, f32, u8) {
+    (x.round(), y.round(), 0)
+}
+
 /// What a run's glyph bitmaps are rasterized with, besides the glyph and
 /// its subpixel bin.
 struct GlyphRaster<'a> {
@@ -950,7 +965,8 @@ mod tests {
     use swash::FontRef;
 
     use super::{
-        Clips, GlyphRaster, glyph_font_key, glyph_raster_position, scaled_embolden_strength,
+        Clips, GlyphRaster, bitmap_raster_position, glyph_font_key, glyph_raster_position,
+        scaled_embolden_strength,
     };
 
     const FIRA_SANS: &[u8] = include_bytes!("../../examples/webgpu/fonts/FiraSans-Medium.ttf");
@@ -1076,6 +1092,29 @@ mod tests {
             assert!(
                 (placed - x).abs() <= 0.125 + 1e-4,
                 "{x}: placed at {placed}"
+            );
+        }
+    }
+
+    /// An emoji's bitmap starts within half a pixel of where it was laid
+    /// out. Left at the pixel left of its quarter, as an outline is, it
+    /// could start three quarters of a pixel left of it, a whole pixel
+    /// in a label centred half a pixel off.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_emoji_is_drawn_from_the_nearest_whole_pixel() {
+        let data = std::fs::read("/System/Library/Fonts/Apple Color Emoji.ttc").unwrap();
+        let font = FontRef::from_index(&data, 0).unwrap();
+        let glyph = font.charmap().map('👀');
+        let raster = raster(font);
+        for x in [10.0, 10.3, 10.5, 10.7, -3.7] {
+            let (px, _, bin) = bitmap_raster_position(x, 40.0);
+            let image = raster.rasterize(glyph, bin);
+            assert!(image.colored, "no color bitmap for the emoji");
+            let left = px + image.left as f32;
+            assert!(
+                (left - x).abs() <= 0.5,
+                "laid out at {x}, drawn from {left}"
             );
         }
     }

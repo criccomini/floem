@@ -539,6 +539,55 @@ mod tests {
         );
     }
 
+    /// An emoji centred in a box has its bitmap's middle at the box's
+    /// middle. Apple Color Emoji gives its cap height as a whole em, while
+    /// swash draws its bitmaps 0.125em below the baseline, so centring on
+    /// the capitals put an emoji low by half of that.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn centred_emoji_puts_its_bitmaps_middle_at_the_boxs_middle() {
+        use parley::layout::PositionedLayoutItem;
+        use parley::swash::{
+            FontRef,
+            scale::{ScaleContext, StrikeWith},
+        };
+        use peniko::kurbo::Rect;
+
+        let mut state = TextLayoutState::new(None);
+        state.set_text("👀", AttrsList::new(Attrs::new().font_size(16.0)), None);
+        let origin = state.centered_text_origin(Rect::new(0.0, 0.0, 32.0, 32.0));
+
+        let layout = state.get_text_layout().expect("a layout");
+        let mut rows = None;
+        for line in layout.parley_layout().lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(run) = item else {
+                    continue;
+                };
+                let font = run.run().font();
+                let font = FontRef::from_index(font.data.data(), font.index as usize).unwrap();
+                let mut context = ScaleContext::new();
+                let mut scaler = context.builder(font).size(run.run().font_size()).build();
+                for glyph in run.positioned_glyphs() {
+                    let Some(image) =
+                        scaler.scale_color_bitmap(glyph.id as u16, StrikeWith::BestFit)
+                    else {
+                        continue;
+                    };
+                    let top = glyph.y - image.placement.top as f32;
+                    rows = Some((top, top + image.placement.height as f32));
+                }
+            }
+        }
+        let (top, bottom) = rows.expect("the emoji's bitmap");
+        let middle = origin.y + f64::from(top + bottom) / 2.0;
+        assert!(
+            (middle - 16.0).abs() < 0.5,
+            "the emoji covers {top}..{bottom} from y {}, its middle at {middle}",
+            origin.y
+        );
+    }
+
     #[test]
     fn taffy_layout_updates_after_text_change_for_measured_text_child() {
         let layout_data = Rc::new(RefCell::new(TextLayoutState::new(None)));

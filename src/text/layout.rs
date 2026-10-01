@@ -36,6 +36,16 @@ thread_local! {
         RefCell::new(ScaleContext::new());
     static GLYPH_OUTLINE_BOUNDS_CACHE: RefCell<HashMap<GlyphOutlineBoundsKey, Option<zeno::Bounds>>> =
         RefCell::new(HashMap::new());
+    static GLYPH_BITMAP_ROWS_CACHE: RefCell<HashMap<GlyphBitmapRowsKey, Option<(f32, f32)>>> =
+        RefCell::new(HashMap::new());
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GlyphBitmapRowsKey {
+    font_blob_id: u64,
+    font_index: u32,
+    glyph_id: u16,
+    font_size_bits: u32,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -763,6 +773,7 @@ impl TextLayout {
     /// Returns the vertical bounds used when visually centering this layout:
     /// from the top of the capitals to the baseline, so neither descenders
     /// nor the room a font's ascent keeps above its capitals move the text.
+    /// A run of color bitmaps, emoji, counts as the rows its bitmaps cover.
     /// A line whose fonts give no cap height falls back to its ascent.
     pub fn centering_bounds_y(&self) -> Option<(f32, f32)> {
         if self.layout.is_empty() {
@@ -774,9 +785,9 @@ impl TextLayout {
         for i in 0..self.layout.len() {
             if let Some(line) = self.layout.get(i) {
                 let m = line.metrics();
-                let cap = line_cap_height(&line).unwrap_or(m.ascent);
-                min_y = min_y.min(m.baseline - cap);
-                max_y = max_y.max(m.baseline);
+                let (top, bottom) = line_centering_rows(&line).unwrap_or((-m.ascent, 0.0));
+                min_y = min_y.min(m.baseline + top);
+                max_y = max_y.max(m.baseline + bottom);
             }
         }
 
@@ -812,18 +823,81 @@ impl TextLayout {
     }
 }
 
-/// The tallest cap height among a line's runs, from each run's font at its
-/// size and variation, or `None` when no run's font reports one.
-fn line_cap_height(line: &parley::layout::Line<'_, TextBrush>) -> Option<f32> {
-    line.runs()
-        .filter_map(|run| {
-            let font = run.font();
-            let font = FontRef::from_index(font.data.data(), font.index as usize)?;
-            let cap = font
-                .metrics(run.normalized_coords())
-                .scale(run.font_size())
-                .cap_height;
-            (cap > 0.0).then_some(cap)
+/// What a line is centred on, as its top and bottom from the baseline,
+/// y down: the union of each run's. A run of text spans the top of its
+/// capitals to the baseline, from its font at its size and variation. A
+/// run of color bitmaps spans the rows they are drawn on, which need not
+/// end at the baseline: swash sets Apple Color Emoji's 0.125em below it,
+/// as Core Text does, while the font gives its cap height as a whole em.
+/// `None` when no run has either.
+fn line_centering_rows(line: &parley::layout::Line<'_, TextBrush>) -> Option<(f32, f32)> {
+    let union = |a: Option<(f32, f32)>, (top, bottom): (f32, f32)| {
+        Some(a.map_or((top, bottom), |(t, b)| (t.min(top), b.max(bottom))))
+    };
+    let mut rows = None;
+    for item in line.items() {
+        let parley::layout::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+            continue;
+        };
+        let run = glyph_run.run();
+        let font = run.font();
+        let Some(font_ref) = FontRef::from_index(font.data.data(), font.index as usize) else {
+            continue;
+        };
+        let bitmaps = if font_ref.color_strikes().next().is_some() {
+            glyph_run
+                .glyphs()
+                .filter_map(|glyph| glyph_bitmap_rows(font, run.font_size(), glyph.id as u16))
+                .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+        } else {
+            None
+        };
+        if let Some(bitmaps) = bitmaps {
+            rows = union(rows, bitmaps);
+            continue;
+        }
+        let cap = font_ref
+            .metrics(run.normalized_coords())
+            .scale(run.font_size())
+            .cap_height;
+        if cap > 0.0 {
+            rows = union(rows, (-cap, 0.0));
+        }
+    }
+    rows
+}
+
+/// The rows a glyph's color bitmap covers at `font_size`, as its top and
+/// bottom from the baseline, y down, placed as swash places it for the
+/// renderer; `None` when the glyph has no color bitmap.
+fn glyph_bitmap_rows(font: &FontData, font_size: f32, glyph_id: u16) -> Option<(f32, f32)> {
+    use parley::swash::scale::StrikeWith;
+
+    let key = GlyphBitmapRowsKey {
+        font_blob_id: font.data.id(),
+        font_index: font.index,
+        glyph_id,
+        font_size_bits: font_size.to_bits(),
+    };
+    if let Some(rows) = GLYPH_BITMAP_ROWS_CACHE.with_borrow(|cache| cache.get(&key).copied()) {
+        return rows;
+    }
+
+    let font_ref = FontRef::from_index(font.data.data(), font.index as usize)?;
+    let rows = OUTLINE_SCALE_CONTEXT.with_borrow_mut(|context| {
+        let mut scaler = context.builder(font_ref).size(font_size).build();
+        let image = scaler.scale_color_bitmap(glyph_id, StrikeWith::BestFit)?;
+        let placement = image.placement;
+        // swash's top is how far the bitmap's first row is above the
+        // baseline.
+        (placement.height > 0).then(|| {
+            let top = -(placement.top as f32);
+            (top, top + placement.height as f32)
         })
-        .reduce(f32::max)
+    });
+
+    GLYPH_BITMAP_ROWS_CACHE.with_borrow_mut(|cache| {
+        cache.insert(key, rows);
+    });
+    rows
 }

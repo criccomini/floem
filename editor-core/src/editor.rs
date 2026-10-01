@@ -1010,7 +1010,10 @@ impl Action {
             }
             ClipboardCopy => {
                 let data = cursor.yank(buffer);
-                clipboard.put_string(data.content);
+                clipboard.put_string(&data.content);
+                if !modal {
+                    register.add_yank(data);
+                }
 
                 match &cursor.mode {
                     CursorMode::Visual { start, end, .. } => {
@@ -1027,7 +1030,10 @@ impl Action {
             }
             ClipboardCut => {
                 let data = cursor.yank(buffer);
-                clipboard.put_string(data.content);
+                clipboard.put_string(&data.content);
+                if !modal {
+                    register.add_yank(data);
+                }
 
                 let selection = if let CursorMode::Insert(mut selection) = cursor.mode.clone() {
                     for region in selection.regions_mut() {
@@ -1051,7 +1057,15 @@ impl Action {
             }
             ClipboardPaste => {
                 if let Some(s) = clipboard.get_string() {
-                    let mode = if s.ends_with('\n') {
+                    // Text ending in a newline pastes as whole lines, above
+                    // the cursor's line. Outside modal mode only a line this
+                    // editor copied or cut does: any other text goes in at the
+                    // cursor, as a text box would put it.
+                    let linewise = s.ends_with('\n')
+                        && (modal
+                            || (register.unnamed.mode == VisualMode::Linewise
+                                && register.unnamed.content == s));
+                    let mode = if linewise {
                         VisualMode::Linewise
                     } else {
                         VisualMode::Normal
@@ -1600,8 +1614,10 @@ enum DuplicateDirection {
 mod test {
     use crate::{
         buffer::{Buffer, rope_text::RopeText},
+        command::EditCommand,
         cursor::{Cursor, CursorAffinity, CursorMode},
-        editor::{Action, DuplicateDirection},
+        editor::{Action, DuplicateDirection, EditConf},
+        register::{Clipboard, Register},
         selection::{SelRegion, Selection},
         word::WordCursor,
     };
@@ -1843,6 +1859,152 @@ mod test {
         end_selection.add_region(SelRegion::caret(13, CursorAffinity::Backward));
         end_selection.add_region(SelRegion::caret(19, CursorAffinity::Backward));
         assert_eq!(cursor.mode, CursorMode::Insert(end_selection));
+    }
+
+    #[derive(Default)]
+    struct TestClipboard(Option<String>);
+
+    impl Clipboard for TestClipboard {
+        fn get_string(&mut self) -> Option<String> {
+            self.0.clone()
+        }
+
+        fn put_string(&mut self, s: impl AsRef<str>) {
+            self.0 = Some(s.as_ref().to_string());
+        }
+    }
+
+    fn edit(
+        cursor: &mut Cursor,
+        buffer: &mut Buffer,
+        cmd: EditCommand,
+        clipboard: &mut TestClipboard,
+        register: &mut Register,
+        modal: bool,
+    ) {
+        Action::do_edit(
+            cursor,
+            buffer,
+            &cmd,
+            clipboard,
+            register,
+            EditConf {
+                comment_token: "",
+                modal,
+                smart_tab: true,
+                keep_indent: true,
+                auto_indent: false,
+            },
+        );
+    }
+
+    fn caret(offset: usize) -> Cursor {
+        Cursor::new(
+            CursorMode::Insert(Selection::caret(offset, CursorAffinity::Forward)),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn paste_text_ending_in_newline_at_the_cursor() {
+        let mut buffer = Buffer::new("> ");
+        let mut cursor = caret(2);
+        let mut clipboard = TestClipboard(Some("pasted\n".to_string()));
+        let mut register = Register::default();
+
+        edit(
+            &mut cursor,
+            &mut buffer,
+            EditCommand::ClipboardPaste,
+            &mut clipboard,
+            &mut register,
+            false,
+        );
+
+        assert_eq!("> pasted\n", buffer.slice_to_cow(0..buffer.len()));
+        assert_eq!(cursor.offset(), 9);
+    }
+
+    #[test]
+    fn paste_a_copied_line_above_the_cursor() {
+        let mut buffer = Buffer::new("abc\ndef");
+        let mut cursor = caret(1);
+        let mut clipboard = TestClipboard::default();
+        let mut register = Register::default();
+
+        // With no selection, copying takes the cursor's whole line.
+        edit(
+            &mut cursor,
+            &mut buffer,
+            EditCommand::ClipboardCopy,
+            &mut clipboard,
+            &mut register,
+            false,
+        );
+        assert_eq!(clipboard.0.as_deref(), Some("abc\n"));
+
+        let mut cursor = caret(6);
+        edit(
+            &mut cursor,
+            &mut buffer,
+            EditCommand::ClipboardPaste,
+            &mut clipboard,
+            &mut register,
+            false,
+        );
+
+        assert_eq!("abc\nabc\ndef", buffer.slice_to_cow(0..buffer.len()));
+    }
+
+    #[test]
+    fn paste_at_the_cursor_once_the_clipboard_moves_on() {
+        let mut buffer = Buffer::new("abc\n> ");
+        let mut cursor = caret(1);
+        let mut clipboard = TestClipboard::default();
+        let mut register = Register::default();
+
+        edit(
+            &mut cursor,
+            &mut buffer,
+            EditCommand::ClipboardCopy,
+            &mut clipboard,
+            &mut register,
+            false,
+        );
+        // Another app puts a different line on the clipboard.
+        clipboard.0 = Some("xyz\n".to_string());
+
+        let mut cursor = caret(6);
+        edit(
+            &mut cursor,
+            &mut buffer,
+            EditCommand::ClipboardPaste,
+            &mut clipboard,
+            &mut register,
+            false,
+        );
+
+        assert_eq!("abc\n> xyz\n", buffer.slice_to_cow(0..buffer.len()));
+    }
+
+    #[test]
+    fn modal_paste_text_ending_in_newline_above_the_cursor() {
+        let mut buffer = Buffer::new("> ");
+        let mut cursor = caret(2);
+        let mut clipboard = TestClipboard(Some("pasted\n".to_string()));
+        let mut register = Register::default();
+
+        edit(
+            &mut cursor,
+            &mut buffer,
+            EditCommand::ClipboardPaste,
+            &mut clipboard,
+            &mut register,
+            true,
+        );
+
+        assert_eq!("pasted\n> ", buffer.slice_to_cow(0..buffer.len()));
     }
 
     // TODO(dbuga): add tests duplicating selections (multiple line blocks)

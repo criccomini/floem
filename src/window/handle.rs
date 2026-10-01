@@ -98,7 +98,15 @@ pub(crate) struct WindowHandle {
     last_presented_at: Instant,
     is_occluded: bool,
     live_resize_until: Option<Instant>,
+    /// When a budgeted update first stopped with deferred messages still
+    /// queued; painting waits for them, up to `MAX_PAINT_HOLD`. See
+    /// `process_update_budgeted`.
+    paint_held_since: Option<Instant>,
 }
+
+/// The longest a paint waits for deferred update messages a budgeted
+/// update left queued, so a stream of them cannot stop the window painting.
+const MAX_PAINT_HOLD: Duration = Duration::from_millis(100);
 
 impl Drop for WindowHandle {
     fn drop(&mut self) {
@@ -202,6 +210,7 @@ impl WindowHandle {
             last_presented_at: Instant::now(),
             is_occluded: false,
             live_resize_until: None,
+            paint_held_since: None,
         };
         if paint_state_initialized {
             window_handle.init_renderer();
@@ -348,6 +357,7 @@ impl WindowHandle {
             last_presented_at: Instant::now(),
             is_occluded: false,
             live_resize_until: None,
+            paint_held_since: None,
         };
 
         window_handle
@@ -793,7 +803,7 @@ impl WindowHandle {
 
     pub(crate) fn render_frame(&mut self) {
         let renderer_ready = matches!(self.paint_state, PaintState::Initialized { .. });
-        if self.window_state.request_paint && renderer_ready {
+        if self.window_state.request_paint && renderer_ready && !self.paint_held() {
             self.window_state.request_paint = false;
             self.paint();
             self.last_presented_at = Instant::now();
@@ -990,6 +1000,7 @@ impl WindowHandle {
 
                 iterations += 1;
                 if iterations >= MAX_ITERS || start.elapsed() >= budget {
+                    self.hold_paint_for_deferred();
                     return false;
                 }
             }
@@ -1001,9 +1012,11 @@ impl WindowHandle {
 
             iterations += 1;
             if iterations >= MAX_ITERS || start.elapsed() >= budget {
+                self.hold_paint_for_deferred();
                 return false;
             }
         }
+        self.paint_held_since = None;
 
         self.set_cursor();
 
@@ -1060,6 +1073,7 @@ impl WindowHandle {
             }
             self.process_deferred_update_messages();
         }
+        self.paint_held_since = None;
 
         self.set_cursor();
 
@@ -1420,6 +1434,28 @@ impl WindowHandle {
 
     fn needs_style(&mut self) -> bool {
         !self.window_state.style_dirty.is_empty()
+    }
+
+    /// A budgeted update stopped short. Deferred messages run after layout
+    /// to settle what layout alone cannot, such as a scroll view's offset
+    /// (`Scroll::scroll_to`, `ensure_visible`), so a frame painted before
+    /// they run shows the layout unsettled: a scroll view just built draws
+    /// at its top, then jumps to its offset a frame later. Painting waits
+    /// for them while they are queued, for `MAX_PAINT_HOLD` at most.
+    fn hold_paint_for_deferred(&mut self) {
+        self.process_central_messages();
+        if self.has_deferred_update_messages() {
+            self.paint_held_since.get_or_insert_with(Instant::now);
+        } else {
+            self.paint_held_since = None;
+        }
+    }
+
+    /// Whether painting waits for deferred update messages: see
+    /// `hold_paint_for_deferred`.
+    pub(crate) fn paint_held(&self) -> bool {
+        self.paint_held_since
+            .is_some_and(|since| since.elapsed() < MAX_PAINT_HOLD)
     }
 
     fn has_deferred_update_messages(&self) -> bool {
@@ -1872,6 +1908,46 @@ mod tests {
         window_handle.destroy();
 
         assert_eq!(closed_count.get(), 1);
+    }
+
+    /// A budgeted update that runs out before a new scroll view's deferred
+    /// `scroll_to` holds the paint, so no frame shows the view at its top;
+    /// the update that applies the offset lets it go.
+    #[test]
+    fn test_budgeted_update_holds_paint_for_deferred_scroll_to() {
+        use crate::views::{Scroll, scroll::ScrollChanged};
+        use peniko::kurbo::{Point, Vec2};
+
+        let root_id = ViewId::new_root();
+        set_current_view(root_id);
+        let offsets = Rc::new(std::cell::RefCell::new(Vec::<Vec2>::new()));
+        let seen = offsets.clone();
+        let view = Scroll::new(Empty::new().style(|s| s.size(100.0, 2000.0)))
+            .scroll_to(|| Some(Point::new(0.0, 500.0)))
+            .on_event_stop(ScrollChanged::listener(), move |_cx, state| {
+                seen.borrow_mut().push(state.offset);
+            })
+            .style(|s| s.size(100.0, 100.0));
+        let mut window_handle =
+            WindowHandle::new_headless(root_id, view, Size::new(800.0, 600.0), 1.0);
+
+        // No budget: the first pass lays the view out and stops there.
+        let quiescent = window_handle.process_update_budgeted(Instant::now(), Duration::ZERO);
+        assert!(!quiescent);
+        assert!(
+            offsets.borrow().is_empty(),
+            "the offset was applied already"
+        );
+        assert!(
+            window_handle.paint_held(),
+            "a frame would paint the scroll view at its top"
+        );
+
+        let quiescent =
+            window_handle.process_update_budgeted(Instant::now(), Duration::from_secs(10));
+        assert!(quiescent);
+        assert_eq!(offsets.borrow().last(), Some(&Vec2::new(0.0, 500.0)));
+        assert!(!window_handle.paint_held(), "the paint is still held");
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::ops::Range;
 use crate::text::TextBrush;
 use crate::text::{FontStyle, FontWeight, FontWidth};
 use fontique::GenericFamily;
+use parley::InlineBox;
 use parley::style::{FontFamily, FontStack, StyleProperty, WordBreakStrength};
 use peniko::Color;
 
@@ -520,6 +521,7 @@ impl AttrsOwned {
 pub struct AttrsList {
     defaults: AttrsOwned,
     spans: Vec<(Range<usize>, AttrsOwned)>,
+    inline_boxes: Vec<InlineBox>,
 }
 
 impl PartialEq for AttrsList {
@@ -535,6 +537,7 @@ impl AttrsList {
         Self {
             defaults: AttrsOwned::new(defaults),
             spans: Vec::new(),
+            inline_boxes: Vec::new(),
         }
     }
 
@@ -546,6 +549,20 @@ impl AttrsList {
     /// Removes all attribute spans, keeping only the defaults.
     pub fn clear_spans(&mut self) {
         self.spans.clear();
+    }
+
+    /// Reserves room in the text for something drawn by the caller, such as
+    /// an image or a formula: a box `width` wide that sits on the baseline,
+    /// `height` above it, before the byte at `index`. Lines break around it
+    /// as around a word. The layout draws nothing there; after layout,
+    /// floem's `TextLayout::inline_boxes` gives where each box landed, by `id`.
+    pub fn add_inline_box(&mut self, inline_box: InlineBox) {
+        self.inline_boxes.push(inline_box);
+    }
+
+    /// Returns the inline boxes, in the order they were added.
+    pub fn inline_boxes(&self) -> &[InlineBox] {
+        &self.inline_boxes
     }
 
     /// Adds an attribute span for the given byte range.
@@ -581,6 +598,14 @@ impl AttrsList {
     pub fn split_off(&mut self, index: usize) -> Self {
         let mut new_spans = Vec::new();
         let mut remaining = Vec::new();
+        let (mut new_boxes, boxes): (Vec<_>, Vec<_>) = self
+            .inline_boxes
+            .drain(..)
+            .partition(|inline_box| inline_box.index >= index);
+        for inline_box in &mut new_boxes {
+            inline_box.index -= index;
+        }
+        self.inline_boxes = boxes;
 
         for (range, attrs) in self.spans.drain(..) {
             if range.start >= index {
@@ -598,10 +623,11 @@ impl AttrsList {
         AttrsList {
             defaults: self.defaults.clone(),
             spans: new_spans,
+            inline_boxes: new_boxes,
         }
     }
 
-    /// Applies all defaults and spans to a Parley [`RangedBuilder`].
+    /// Applies all defaults, spans and inline boxes to a Parley [`RangedBuilder`].
     ///
     /// This first pushes the default attributes, then layers each span on top
     /// for its byte range. Span properties that match the defaults are skipped
@@ -615,6 +641,9 @@ impl AttrsList {
             attrs
                 .as_attrs()
                 .apply_range(builder, range.clone(), &defaults);
+        }
+        for inline_box in &self.inline_boxes {
+            builder.push_inline_box(inline_box.clone());
         }
     }
 

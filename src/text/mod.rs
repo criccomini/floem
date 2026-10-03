@@ -16,12 +16,12 @@ mod layout_state;
 
 pub use floem_renderer::text::{
     Attrs, AttrsList, AttrsOwned, FamilyOwned, FontStyle, FontWeight, FontWidth, Glyph,
-    GlyphRunProps, LineHeightValue, NormalizedCoord,
+    GlyphRunProps, InlineBox, LineHeightValue, NormalizedCoord,
 };
 pub use layout::{FONT_CONTEXT, TextLayout, TextSelection};
 pub use layout_state::{TextLayoutState, TextOverflowChanged};
 pub use parley::Alignment;
-pub use parley::layout::{Affinity, Cursor, Selection};
+pub use parley::layout::{Affinity, Cursor, PositionedInlineBox, Selection};
 pub use parley::style::{OverflowWrap, TextWrapMode, WordBreakStrength};
 
 /// Returns the byte ranges of the source text's logical paragraphs.

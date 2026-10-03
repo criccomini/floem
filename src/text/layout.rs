@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use parley::swash::{FontRef, scale::ScaleContext, zeno};
 use parley::{
     Affinity, Alignment, Cursor, FontContext, LayoutContext, Selection,
-    layout::{AlignmentOptions, Layout},
+    layout::{AlignmentOptions, Layout, PositionedInlineBox, PositionedLayoutItem},
     style::{OverflowWrap, StyleProperty, TextWrapMode},
 };
 use peniko::{
@@ -415,6 +415,12 @@ impl TextLayout {
                             .as_attrs()
                             .apply_range(&mut builder, display_range, &defaults);
                     }
+                    for inline_box in attrs_list.inline_boxes() {
+                        builder.push_inline_box(parley::InlineBox {
+                            index: ti.orig_to_display(inline_box.index),
+                            ..inline_box.clone()
+                        });
+                    }
                 } else {
                     attrs_list.apply_to_builder(&mut builder);
                 }
@@ -485,6 +491,20 @@ impl TextLayout {
     /// access and should be used sparingly.
     pub fn parley_layout(&self) -> &Layout<TextBrush> {
         &self.layout
+    }
+
+    /// Returns where the inline boxes added with
+    /// `AttrsList::add_inline_box` landed, in layout coordinates: each
+    /// box's top left, its size and its `id`, in visual order.
+    pub fn inline_boxes(&self) -> Vec<PositionedInlineBox> {
+        self.layout
+            .lines()
+            .flat_map(|line| line.items())
+            .filter_map(|item| match item {
+                PositionedLayoutItem::InlineBox(inline_box) => Some(inline_box),
+                PositionedLayoutItem::GlyphRun(_) => None,
+            })
+            .collect()
     }
 
     /// Returns the number of visual lines currently in the layout.
@@ -678,8 +698,25 @@ impl TextLayout {
                     // narrower than the actual ink for italic or otherwise overhanging outlines.
                     // We union in cached outline bounds for the selected glyphs on this line so the
                     // painted selection fully covers the rendered text.
+                    // Where each run starts, where the line has inline
+                    // boxes: the runs' advances leave out the boxes
+                    // between them, which push the runs after along.
+                    let mut starts: Vec<(usize, f64)> = Vec::new();
+                    if !self.layout.inline_boxes().is_empty() {
+                        for item in line.items() {
+                            if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
+                                let index = glyph_run.run().index();
+                                if !starts.iter().any(|(i, _)| *i == index) {
+                                    starts.push((index, glyph_run.offset() as f64));
+                                }
+                            }
+                        }
+                    }
                     let mut run_offset = m.offset as f64;
                     for run in line.runs() {
+                        if let Some((_, start)) = starts.iter().find(|(i, _)| *i == run.index()) {
+                            run_offset = *start;
+                        }
                         let run_range = run.text_range();
                         if run_range.end <= selection_range.start
                             || run_range.start >= selection_range.end

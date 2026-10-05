@@ -1306,8 +1306,11 @@ pub fn cursor_caret(
             rvline,
         }
     } else {
+        // The bar is centred on the caret's x, except at the start of a
+        // line: the editor clips at x = 0, so a bar from -1 kept only its
+        // right half there, which the renderer could round away entirely.
         LineRegion {
-            x: x0 - 1.0,
+            x: (x0 - 1.0).max(0.0),
             width: 2.0,
             rvline,
         }

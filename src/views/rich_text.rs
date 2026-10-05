@@ -8,7 +8,15 @@ use taffy::tree::NodeId;
 
 use crate::{IntoView, context::UpdateCx, view::LayoutNodeCx, view::View, view::ViewId};
 
+use crate::style::TextOverflow;
 use crate::text::TextLayoutState;
+
+/// What rich text does with a line wider than the view, unless told
+/// otherwise: wraps it.
+const WRAP: TextOverflow = TextOverflow::Wrap {
+    overflow_wrap: crate::text::OverflowWrap::Normal,
+    word_break: crate::text::WordBreakStrength::Normal,
+};
 
 pub struct RichText {
     id: ViewId,
@@ -16,6 +24,9 @@ pub struct RichText {
     layout_data: Rc<RefCell<TextLayoutState>>,
     text_node: Option<NodeId>,
     layout_node: Option<NodeId>,
+    /// What a line wider than the view does: wraps, unless
+    /// [`RichText::text_overflow`] said otherwise.
+    text_overflow: TextOverflow,
 }
 
 pub fn rich_text(
@@ -35,10 +46,7 @@ pub fn rich_text(
     {
         let mut data = layout_data.borrow_mut();
         data.set_text(&text, attrs_list, None);
-        data.set_text_overflow(crate::style::TextOverflow::Wrap {
-            overflow_wrap: crate::text::OverflowWrap::Normal,
-            word_break: crate::text::WordBreakStrength::Normal,
-        });
+        data.set_text_overflow(WRAP);
     }
 
     let mut rich_text = RichText {
@@ -46,6 +54,7 @@ pub fn rich_text(
         layout_data,
         text_node: None,
         layout_node: None,
+        text_overflow: WRAP,
     };
 
     rich_text.set_taffy_layout();
@@ -53,6 +62,18 @@ pub fn rich_text(
 }
 
 impl RichText {
+    /// What a line wider than the view does: wraps onto the next, which
+    /// is the default, or stays one line and is clipped or cut short with
+    /// an ellipsis, as a label's does with the same style.
+    pub fn text_overflow(mut self, text_overflow: TextOverflow) -> Self {
+        self.text_overflow = text_overflow;
+        self.layout_data
+            .borrow_mut()
+            .set_text_overflow(text_overflow);
+        self.mark_text_measure_dirty();
+        self
+    }
+
     fn mark_text_measure_dirty(&self) {
         if let Some(text_node) = self.text_node {
             let _ = self.id.taffy().borrow_mut().mark_dirty(text_node);
@@ -123,10 +144,7 @@ impl View for RichText {
 
             let mut data = self.layout_data.borrow_mut();
             data.set_text(&text, attrs_list, None);
-            data.set_text_overflow(crate::style::TextOverflow::Wrap {
-                overflow_wrap: crate::text::OverflowWrap::Normal,
-                word_break: crate::text::WordBreakStrength::Normal,
-            });
+            data.set_text_overflow(self.text_overflow);
             drop(data);
 
             self.mark_text_measure_dirty();

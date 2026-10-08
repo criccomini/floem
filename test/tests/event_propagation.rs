@@ -3449,3 +3449,62 @@ fn test_nested_containers_clip_inheritance() {
         deepest_clicks.get()
     );
 }
+
+#[test]
+#[serial]
+fn test_back_and_forward_buttons_do_not_click() {
+    // A mouse's back and forward buttons make no click, as in a browser,
+    // which gives them `auxclick` and no `click`. Their presses still go
+    // out as pointer events.
+    use floem::event::{Event, listener};
+    use std::{cell::Cell, rc::Rc};
+    use ui_events::pointer::{
+        PointerButton, PointerButtonEvent, PointerEvent, PointerId, PointerInfo, PointerState,
+        PointerType,
+    };
+
+    let press = |button: PointerButton, down: bool| {
+        let event = PointerButtonEvent {
+            // At the view's top left corner, (0, 0).
+            state: PointerState {
+                count: 1,
+                ..Default::default()
+            },
+            button: Some(button),
+            pointer: PointerInfo {
+                pointer_id: Some(PointerId::PRIMARY),
+                persistent_device_id: None,
+                pointer_type: PointerType::Mouse,
+            },
+        };
+        Event::Pointer(if down {
+            PointerEvent::Down(event)
+        } else {
+            PointerEvent::Up(event)
+        })
+    };
+
+    let root = TestRoot::new();
+    let tracker = ClickTracker::new();
+    let downs = Rc::new(Cell::new(0));
+    let counted = downs.clone();
+    let view = tracker
+        .track_named("target", Empty::new().style(|s| s.size(100.0, 100.0)))
+        .on_event_cont(listener::PointerDown, move |_, _| {
+            counted.set(counted.get() + 1)
+        })
+        .style(|s| s.size(100.0, 100.0));
+
+    let mut harness = HeadlessHarness::new_with_size(root, view, 100.0, 100.0);
+
+    for button in [PointerButton::X1, PointerButton::X2] {
+        harness.dispatch_event(press(button, true));
+        harness.dispatch_event(press(button, false));
+    }
+    assert_eq!(tracker.click_count(), 0, "back and forward make no click");
+    assert_eq!(downs.get(), 2, "their presses still go out");
+
+    // The primary button still clicks.
+    harness.click(50.0, 50.0);
+    assert_eq!(tracker.click_count(), 1);
+}

@@ -2153,7 +2153,7 @@ impl RouteCx<'_, '_> {
         match pe {
             PointerEvent::Down(PointerButtonEvent {
                 button, pointer, ..
-            }) => {
+            }) if clicks(*button) => {
                 let click_path = {
                     let box_tree = self.gcx.window_state.box_tree.borrow();
                     hit_path_to_dispatch_path(path.as_ref(), &box_tree)
@@ -2184,7 +2184,7 @@ impl RouteCx<'_, '_> {
                         .set_pointer_capture(pointer_id, target);
                 }
             }
-            PointerEvent::Up(pbe @ PointerButtonEvent { button, state, .. }) => {
+            PointerEvent::Up(pbe @ PointerButtonEvent { button, state, .. }) if clicks(*button) => {
                 self.handle_click_events(
                     &path,
                     point,
@@ -2425,4 +2425,17 @@ mod tests {
 
         assert_eq!(result.as_slice(), &[root, container, target]);
     }
+}
+
+/// Whether a press and release of `button` makes a click: the primary
+/// button's, a touch's or a pen's, the secondary button's, which is a
+/// secondary click, and the middle button's. A mouse's back and forward
+/// buttons and the ones past them make none, as in a browser, which
+/// gives them `auxclick` and no `click`: a back press over a button is
+/// not a press of the button. Their pointer events still go out.
+fn clicks(button: Option<PointerButton>) -> bool {
+    matches!(
+        button,
+        None | Some(PointerButton::Primary | PointerButton::Secondary | PointerButton::Auxiliary)
+    )
 }

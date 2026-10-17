@@ -94,6 +94,7 @@ prop_extractor! {
         pub border_bottom_color: BorderBottomColor,
         pub background: Background,
         pub shadow: BoxShadowProp,
+        pub opacity: crate::style::Opacity,
     }
 }
 

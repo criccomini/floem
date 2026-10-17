@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem;
 use std::sync::Arc;
 use std::sync::mpsc::sync_channel;
@@ -39,6 +40,12 @@ pub struct VgerRenderer {
     scale: f64,
     transform: Affine,
     clip: Option<Rect>,
+    /// The opacity of the layers pushed so far, multiplied together, with
+    /// the product before each push. vger draws straight to its target and
+    /// has no layers to composite, so a layer's alpha is multiplied into
+    /// every paint drawn inside it instead.
+    alpha: f32,
+    alphas: Vec<f32>,
     capture: bool,
     font_embolden: f32,
     adapter: Adapter,
@@ -116,6 +123,8 @@ impl VgerRenderer {
             config,
             transform: Affine::IDENTITY,
             clip: None,
+            alpha: 1.0,
+            alphas: Vec::new(),
             capture: false,
             font_embolden,
             adapter,
@@ -154,6 +163,8 @@ impl VgerRenderer {
     }
 
     fn brush_to_paint<'b>(&mut self, brush: impl Into<BrushRef<'b>>) -> Option<PaintIndex> {
+        let alpha = self.alpha;
+        let vger_color = |color: Color| vger_color(color.multiply_alpha(alpha));
         let paint = match brush.into() {
             BrushRef::Solid(color) => self.vger.color_paint(vger_color(color)),
             BrushRef::Gradient(g) => match g.kind {
@@ -180,6 +191,56 @@ impl VgerRenderer {
             BrushRef::Image(_) => return None,
         };
         Some(paint)
+    }
+
+    /// Draws a colour bitmap of `width` by `height` (RGBA) at the current
+    /// layer alpha, through vger's glyph cache, keyed on `kind`, `hash` and
+    /// the size.
+    #[allow(clippy::too_many_arguments)]
+    fn render_faded_bitmap(
+        &mut self,
+        x: f32,
+        y: f32,
+        kind: &str,
+        hash: &[u8],
+        width: u32,
+        height: u32,
+        rgba: impl FnOnce() -> Option<Vec<u8>>,
+    ) {
+        let mut hasher = DefaultHasher::new();
+        kind.hash(&mut hasher);
+        hash.hash(&mut hasher);
+        let paint = self
+            .vger
+            .color_paint(vger_color(Color::WHITE.multiply_alpha(self.alpha)));
+        self.vger.render_glyph(
+            x,
+            y,
+            hasher.finish(),
+            0,
+            width,
+            (0, 0),
+            height,
+            || match rgba() {
+                Some(data) => GlyphImage {
+                    data: Blob::new(Arc::new(data)),
+                    width,
+                    height,
+                    left: 0,
+                    top: 0,
+                    colored: true,
+                },
+                None => GlyphImage {
+                    data: Blob::new(Arc::new([])),
+                    width: 0,
+                    height: 0,
+                    left: 0,
+                    top: 0,
+                    colored: true,
+                },
+            },
+            paint,
+        );
     }
 
     fn vger_point(&self, point: Point) -> floem_vger_rs::defs::LocalPoint {
@@ -319,6 +380,8 @@ impl Renderer for VgerRenderer {
         }
 
         self.transform = Affine::IDENTITY;
+        self.alpha = 1.0;
+        self.alphas.clear();
         self.vger
             .begin(self.config.width as f32, self.config.height as f32, 1.0);
     }
@@ -616,6 +679,28 @@ impl Renderer for VgerRenderer {
         let width = (rect.width() * scale_x.abs()).round().max(1.0) as u32;
         let height = (rect.height() * scale_y.abs()).round().max(1.0) as u32;
 
+        if self.alpha < 1.0 {
+            // vger's image draw takes no paint. Its glyph draw does, and
+            // fades a colour bitmap by the paint's alpha, so a faded image
+            // goes in as a bitmap of its drawn size.
+            let image = &img.img.image;
+            self.render_faded_bitmap(x, y, "img", img.hash, width, height, || {
+                let source = image::RgbaImage::from_raw(
+                    image.width,
+                    image.height,
+                    image.data.data().to_vec(),
+                )?;
+                let resized = image::imageops::resize(
+                    &source,
+                    width,
+                    height,
+                    image::imageops::FilterType::Triangle,
+                );
+                Some(resized.into_raw())
+            });
+            return;
+        }
+
         self.vger.render_image(x, y, img.hash, width, height, || {
             let data = img.img.image.data;
             let (width, height) = (img.img.image.width, img.img.image.height);
@@ -649,30 +734,31 @@ impl Renderer for VgerRenderer {
         let height = (rect.height() * scale_y.abs()).round().max(1.0) as u32;
 
         let paint = brush.and_then(|b| self.brush_to_paint(b));
+        let rasterize = || {
+            let mut img = tiny_skia::Pixmap::new(width, height).unwrap();
 
-        self.vger.render_svg(
-            x,
-            y,
-            svg.hash,
-            width,
-            height,
-            || {
-                let mut img = tiny_skia::Pixmap::new(width, height).unwrap();
+            let svg_scale = (width as f32 / svg.tree.size().width())
+                .min(height as f32 / svg.tree.size().height());
 
-                let svg_scale = (width as f32 / svg.tree.size().width())
-                    .min(height as f32 / svg.tree.size().height());
+            let final_scale_x = svg_scale;
+            let final_scale_y = svg_scale;
 
-                let final_scale_x = svg_scale;
-                let final_scale_y = svg_scale;
+            let transform = tiny_skia::Transform::from_scale(final_scale_x, final_scale_y);
 
-                let transform = tiny_skia::Transform::from_scale(final_scale_x, final_scale_y);
+            resvg::render(svg.tree, transform, &mut img.as_mut());
 
-                resvg::render(svg.tree, transform, &mut img.as_mut());
+            img.take()
+        };
 
-                img.take()
-            },
-            paint,
-        );
+        if paint.is_none() && self.alpha < 1.0 {
+            // A recoloured SVG fades through its paint; one in its own
+            // colours has none, so it goes in as a faded bitmap.
+            self.render_faded_bitmap(x, y, "svg", svg.hash, width, height, || Some(rasterize()));
+            return;
+        }
+
+        self.vger
+            .render_svg(x, y, svg.hash, width, height, rasterize, paint);
     }
 
     fn set_transform(&mut self, transform: Affine) {
@@ -743,16 +829,29 @@ impl Renderer for VgerRenderer {
         }
     }
 
+    /// Fades what is drawn until the matching [`pop_layer`] by `alpha`.
+    ///
+    /// vger has no layers, so the blend mode and the clip are ignored and
+    /// the contents are not flattened first: where two children inside a
+    /// faded view overlap, the one behind shows through.
+    ///
+    /// [`pop_layer`]: Renderer::pop_layer
     fn push_layer(
         &mut self,
         _blend: impl Into<peniko::BlendMode>,
-        _alpha: f32,
+        alpha: f32,
         _transform: Affine,
         _clip: &impl Shape,
     ) {
+        self.alphas.push(self.alpha);
+        self.alpha *= alpha.clamp(0.0, 1.0);
     }
 
-    fn pop_layer(&mut self) {}
+    fn pop_layer(&mut self) {
+        if let Some(alpha) = self.alphas.pop() {
+            self.alpha = alpha;
+        }
+    }
 
     fn debug_info(&self) -> String {
         use std::fmt::Write;

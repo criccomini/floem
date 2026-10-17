@@ -13,7 +13,8 @@ pub use renderer::Renderer;
 
 use floem_renderer::Renderer as FloemRenderer;
 use floem_renderer::gpu_resources::{GpuResourceError, GpuResources};
-use peniko::kurbo::{Affine, RoundedRect, Shape, Size};
+use peniko::Mix;
+use peniko::kurbo::{Affine, Point, Rect, RoundedRect, Shape, Size};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use understory_box_tree::NodeFlags;
@@ -303,7 +304,21 @@ impl GlobalPaintCx<'_> {
             font_size_cx: view_state.borrow().layout_props.font_size_cx(),
         };
 
+        // A view drawn at less than full opacity paints itself and its
+        // children into a layer that is composited at that opacity. The
+        // layer covers the whole window, so children that overflow the view
+        // fade with it.
+        let opacity = element_id
+            .is_view()
+            .then(|| view_state.borrow().view_style_props.opacity())
+            .map(|opacity| opacity.clamp(0.0, 1.0))
+            .filter(|opacity| *opacity < 1.0 && device_transform.determinant() != 0.0);
+
         if !is_post {
+            if let Some(opacity) = opacity {
+                let window = Rect::from_origin_size(Point::ZERO, cx.size());
+                cx.push_layer(Mix::Normal, opacity, device_transform.inverse(), &window);
+            }
             if element_id.is_view() {
                 let state = view_state.borrow();
                 paint_bg(&mut cx, &state.view_style_props, layout_rect);
@@ -329,6 +344,9 @@ impl GlobalPaintCx<'_> {
                 let state = view_state.borrow();
                 paint_outline(&mut cx, &state.view_style_props, layout_rect);
             }
+            if opacity.is_some() {
+                cx.pop_layer();
+            }
         }
     }
 }
@@ -353,7 +371,6 @@ impl PaintCx<'_> {
     /// Clip the drawing area (delegates to helper methods)
     pub fn clip(&mut self, shape: &impl Shape) {
         if self.paint_state.renderer().uses_layer_clip() {
-            use peniko::Mix;
             self.push_layer(Mix::Normal, 1.0, Affine::IDENTITY, shape);
         } else {
             self.paint_state.renderer_mut().clip(shape);

@@ -1517,6 +1517,8 @@ impl WindowHandle {
             Some(CursorStyle::NResize) => CursorIcon::NResize,
             Some(CursorStyle::NeswResize) => CursorIcon::NeswResize,
             Some(CursorStyle::NwseResize) => CursorIcon::NwseResize,
+            Some(CursorStyle::ZoomIn) => CursorIcon::ZoomIn,
+            Some(CursorStyle::ZoomOut) => CursorIcon::ZoomOut,
             None => CursorIcon::Default,
         };
         if cursor != self.window_state.last_cursor_icon {

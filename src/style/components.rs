@@ -64,6 +64,8 @@ pub enum CursorStyle {
     SeResize,
     NeswResize,
     NwseResize,
+    ZoomIn,
+    ZoomOut,
 }
 
 /// Structure holding data about the shadow.

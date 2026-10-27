@@ -24,14 +24,16 @@
 //! - Styles with container queries (future)
 //! - Styles that depend on element-specific attributes
 
+use std::any::Any;
 use std::hash::{Hash, Hasher};
+use std::rc::{Rc, Weak};
 
 use super::cx::InheritedInteractionCx;
 use super::selectors::StyleSelectors;
 
 use rustc_hash::{FxHashMap, FxHasher};
 
-use super::Style;
+use super::{Style, StyleKey};
 use crate::layout::responsive::ScreenSizeBp;
 use crate::style::{InteractionState, StyleClassRef};
 
@@ -43,6 +45,18 @@ const MAX_ENTRIES_PER_BUCKET: usize = 4;
 
 /// Target number of entries when pruning.
 const PRUNE_TARGET: usize = 192;
+
+/// A style's inner map, held weakly by the cache.
+type StyleMap = FxHashMap<StyleKey, Rc<dyn Any>>;
+
+/// A weak handle on `style`'s inner map. While it lives the map's
+/// allocation does, so no other map can be given its address, and a
+/// pointer compared against it names the same map. `Rc::make_mut` moves a
+/// map that has a weak handle to a new allocation, so a changed map gets a
+/// new pointer too.
+fn pin(style: &Style) -> Weak<StyleMap> {
+    Rc::downgrade(&style.map)
+}
 
 /// A cache key for style resolution results.
 ///
@@ -67,6 +81,12 @@ pub struct StyleCacheKey {
     /// This works because the same logical class_context shares the same Rc instance
     /// across siblings, and Rc::make_mut creates a new Rc when content changes.
     class_context_ptr: usize,
+    /// Keeps the class context's address from being given to another
+    /// class context while the key is in the cache; see `pin`. Without it
+    /// a class context freed and another allocated in its place, as a
+    /// restyle that changes a class's colour does, matched the old key and
+    /// got the old style. Not part of the key's identity.
+    _class_context_pin: Weak<StyleMap>,
 }
 
 impl StyleCacheKey {
@@ -105,6 +125,7 @@ impl StyleCacheKey {
             window_width_bits: interact_state.window_width.to_bits(),
             classes_hash: hash_classes(classes),
             class_context_ptr: class_context.map_ptr(),
+            _class_context_pin: pin(class_context),
         }
     }
 }
@@ -158,6 +179,9 @@ struct CacheEntry {
     /// During tree traversal, siblings share the same parent Style,
     /// so pointer comparison avoids expensive inherited_equal() calls.
     parent_map_ptr: usize,
+    /// Keeps the parent's map at `parent_map_ptr` while the entry lives,
+    /// so the fast path cannot match another map at the same address.
+    _parent_pin: Weak<StyleMap>,
     /// Last access time for LRU eviction.
     last_access: u64,
 }
@@ -219,6 +243,7 @@ impl CacheBucket {
         post_interact: InheritedInteractionCx,
         parent_inherited: Style,
         parent_map_ptr: usize,
+        parent_pin: Weak<StyleMap>,
         clock: u64,
     ) {
         // Evict oldest if at capacity
@@ -239,6 +264,7 @@ impl CacheBucket {
             post_interact,
             parent_inherited,
             parent_map_ptr,
+            _parent_pin: parent_pin,
             last_access: clock,
         });
     }
@@ -353,6 +379,7 @@ impl StyleCache {
             post_interact,
             parent_inherited,
             parent_map_ptr,
+            pin(parent_style),
             self.clock,
         );
         let new_len = bucket.len();
@@ -643,12 +670,43 @@ mod tests {
             window_width_bits: 0,
             classes_hash: 0,
             class_context_ptr: 0,
+            _class_context_pin: Weak::new(),
         };
 
         cache_insert(&mut cache, key.clone(), &style, &parent_style);
 
         let result = cache.get(&key, &parent_style);
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_cached_maps_keep_their_addresses() {
+        // A key and an entry name the class context and the parent by
+        // address. Were either map freed and another given its address,
+        // the other would match them and get a style resolved against
+        // different classes or a different parent.
+        let mut cache = StyleCache::new();
+        let class_context = Style::new().background(css::RED);
+        let parent = Style::new().color(css::RED);
+        let (class_context_ptr, parent_ptr) = (class_context.map_ptr(), parent.map_ptr());
+        let key = StyleCacheKey::new(
+            &Style::new().width(1.0),
+            &InteractionState::default(),
+            ScreenSizeBp::Xs,
+            &[],
+            &class_context,
+        );
+        cache_insert(&mut cache, key, &Style::new(), &parent);
+        drop(class_context);
+        drop(parent);
+
+        let fresh: Vec<Style> = (0..64)
+            .map(|i| Style::new().background(css::BLUE).width(i as f64))
+            .collect();
+        for style in &fresh {
+            assert_ne!(style.map_ptr(), class_context_ptr);
+            assert_ne!(style.map_ptr(), parent_ptr);
+        }
     }
 
     #[test]
@@ -665,6 +723,7 @@ mod tests {
             window_width_bits: 0,
             classes_hash: 0,
             class_context_ptr: 0,
+            _class_context_pin: Weak::new(),
         };
 
         // Insert with parent_style1
@@ -696,6 +755,7 @@ mod tests {
             window_width_bits: 0,
             classes_hash: 0,
             class_context_ptr: 0,
+            _class_context_pin: Weak::new(),
         };
 
         // Miss
@@ -726,6 +786,7 @@ mod tests {
             window_width_bits: 0,
             classes_hash: 0,
             class_context_ptr: 0,
+            _class_context_pin: Weak::new(),
         };
 
         cache_insert(&mut cache, key.clone(), &style, &parent_style);
@@ -763,6 +824,7 @@ mod tests {
             window_width_bits: 0,
             classes_hash: 0,
             class_context_ptr: 100,
+            _class_context_pin: Weak::new(),
         };
 
         let key2 = StyleCacheKey {
@@ -772,6 +834,7 @@ mod tests {
             window_width_bits: 0,
             classes_hash: 0,
             class_context_ptr: 200,
+            _class_context_pin: Weak::new(),
         };
 
         // Insert with key1
@@ -993,6 +1056,7 @@ mod tests {
                 window_width_bits: 0,
                 classes_hash: 0,
                 class_context_ptr: 0,
+                _class_context_pin: Weak::new(),
             };
             let style = Style::new().width(i as f64);
             cache_insert(&mut cache, key, &style, &parent_style);
